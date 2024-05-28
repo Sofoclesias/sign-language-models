@@ -1,3 +1,5 @@
 .idea/
 synthetic-asl-alphabet/
+**/.ipynb_checkpoints/
 **/kaggle.json
+__pycache__/
