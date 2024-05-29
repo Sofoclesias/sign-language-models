@@ -4,7 +4,7 @@ import QOL_funcs as qol
 warnings.filterwarnings('ignore')
 
 def proc(path):
-    ins = qol.mediapipe_landmarks(path)
+    ins = qol.hog_transform(path)
     ins.to_csv(normalize=True)
     qol.dump_object(ins,'dump.pkl')
 
