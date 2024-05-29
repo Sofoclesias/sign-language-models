@@ -1,4 +1,8 @@
 from multiprocessing import Lock
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
 import pandas as pd
 import numpy as np
 import os
@@ -19,7 +23,7 @@ def create_multiproc_files(func: str,path: str):
         commands = f"""\
 import datetime
 import warnings
-import QOL_funcs as qol
+import QoL as qol
 warnings.filterwarnings('ignore')
 
 def proc(path):
@@ -78,6 +82,13 @@ def dataset_exists():
         import opendatasets as od
         od.download("https://www.kaggle.com/datasets/lexset/synthetic-asl-alphabet",)
 
+def load_model(keywords: dict):
+    # keywords = {'tecnica': (graph,gradient,neural), 'modelo':(knn,rf,rn)}
+    path = venv + f'{keywords['tecnica']}-processing/{keywords['modelo']}-model.pkl'
+    with open(path,'rb') as file:
+        model = pickle.load(file)
+    return model
+    
 def locking(lock):
     def decorator(func):
         @functools.wraps(func)
@@ -104,11 +115,6 @@ def dump_object(obj,filename):
         
     with open(filename,'wb') as file:
         pickle.dump(data,file)
-    
-def camera(): # FUNCIÓN NO UTILIZADA. SERVIRÁ PARA MÁS ADELANTE.
-    cv2.imshow()
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
 
 # --------------
 # Transformación de imágenes
@@ -231,11 +237,11 @@ class image_preprocessing:
         
         return segmented, self.color
 
-class mediapipe_landmarks:
-    def __init__(self, image_path: str):
+class mediapipe_landmarks(image_preprocessing):
+    def __init__(self, image_path, color: str = 'bgr'):
         import mediapipe as mp
-        
-        self.image_path: str = image_path
+        super().__init__(image_path,color)
+        self.image_path = image_path
         
         # Iniciar el framework de reconocimiento de coordenadas
         mp_hands = mp.solutions.hands
@@ -243,8 +249,7 @@ class mediapipe_landmarks:
         mp_drawing = mp.solutions.drawing_utils
 
         # Leer y procesar la imagen
-        image = cv2.imread(image_path)
-        self.__image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image_rgb = self.to_rgb(to_self=False)
         results = hands.process(self.__image_rgb)
         self.coords: np.array = np.empty((0, 2))
 
@@ -255,22 +260,23 @@ class mediapipe_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
                 for idx, landmark in enumerate(hand_landmarks.landmark):
                     # Extraer las coordenadas y guardarlas en lista
-                    h, w, c = image.shape
+                    h, w, c = self.image.shape
                     cx, cy = int(landmark.x * w), int(landmark.y * h)
                     self.coords = np.vstack((self.coords, np.array([cx, cy]).reshape(1, -1)))
-                mp_drawing.draw_landmarks(self.__image_rgb, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                mp_drawing.draw_landmarks(image_rgb, hand_landmarks, mp_hands.HAND_CONNECTIONS)
         else:
             self.results: bool = False
             self.coords = np.zeros((21, 2))
 
         hands.close()
         
+        self.image = image_rgb
         self.__is_normalized: bool = False
 
     def visualize_landmarks(self):     
         import matplotlib.pyplot as plt
         plt.figure(figsize=(10, 10))
-        plt.imshow(self.__image_rgb)
+        plt.imshow(self.image)
         plt.axis('off')  # Ocultar los ejes
         plt.show()
         
@@ -294,9 +300,15 @@ class mediapipe_landmarks:
         ruta = r'\graph-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         append_csv(venv + ruta, pd.DataFrame([coords], columns=columns))
         
+    def extract_values (self,normalize: bool = True):
+        if normalize==True and self.__is_normalized==False:
+            self.normalize_coords()
+        else: pass
         
+        return self.coords.flatten().tolist()
+           
 class hog_transform(image_preprocessing):
-    def __init__(self, image_path: str, color: str = 'bgr'):
+    def __init__(self, image_path, color: str = 'bgr'):
         from skimage.feature import hog
         super().__init__(image_path,color)
         self.image_path = image_path
@@ -333,6 +345,90 @@ class hog_transform(image_preprocessing):
 
         ruta = r'\gradient-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         append_csv(venv + ruta, pd.DataFrame([feats], columns=columns))
+        
+    def extract_values (self,normalize: bool = True):
+        if normalize==True and self.__is_normalized==False:
+            self.normalize_hog()
+        else: pass
+        
+        self.image = self.hog_image
+        return self.hog_features.flatten().tolist()
+
+# Acá iría la clase de CNN
+
+
+
+class model_trainer:
+    def __init__(self,keywords: dict):
+        # keywords = {'técnica': (graph,gradient) , 'modelo':(knn,rf)}
+        # Claves
+        if keywords['técnica'] in ['graph','gradient','neural'] and keywords['modelo'] in ['knn','rf','rn']:
+            self.representacion = keywords['técnica']
+            self.clave_modelo = keywords['modelo']
+        else: 
+            raise ValueError('Técnica de representación o modelo no identificado.')
+        
+        # Conjuntos de entrenamiento y prueba
+        train_set = pd.DataFrame(venv + f'{self.representacion}-processing/processed_data/Train_Alphabet.csv')
+        test_set = pd.DataFrame(venv + f'{self.representacion}-processing/processed_data/Test_Alphabet.csv')
+
+        self.train_set = [train_set.iloc[:,1:],train_set.iloc[:,0]]
+        self.test_set = [test_set.iloc[:,1:],test_set.iloc[:,0]]
+        
+        # Definición de los modelos e hiperparámetros
+        self.modelo = None
+        self.param_distributions = None
+        self.__is_trained = False
+        self.train_report = None
+        self.test_report = None
+        
+    def setup_model(self):
+        if self.clave_modelo == 'knn':
+            self.modelo = KNeighborsClassifier()
+            self.param_distributions = {
+                'n_neighbors': np.arange(1, 31),
+                'weights': ['uniform', 'distance'],
+                'metric': ['euclidean', 'manhattan', 'minkowski']
+            }
+        elif self.clave_modelo == 'rf':
+            self.modelo = RandomForestClassifier(random_state=42)
+            self.param_distributions = {
+                'n_estimators': np.arange(10, 200),
+                'max_features': ['auto', 'sqrt', 'log2'],
+                'max_depth': [None] + list(np.arange(5, 50, 5)),
+                'min_samples_split': np.arange(2, 11),
+                'min_samples_leaf': np.arange(1, 11)
+            }
+        elif self.clave_modelo == 'rn':
+            pass
+        
+    def train_model(self):
+        # Configurar el modelo
+        self.setup_model()
+        
+        # Configurar RandomizedSearchCV
+        random_search = RandomizedSearchCV(
+            estimator=self.modelo,
+            param_distributions=self.param_distributions,
+            n_iter=100, # Por ajustar
+            cv = 5, # Por ajustar
+            verbose = 2,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        random_search.fit(*self.train_set)
+        self.modelo = random_search.best_estimator_
+        self.__is_trained = True
+        
+        # Reportes de error
+        self.train_report = classification_report(self.train_set[1],self.modelo.predict(self.train_set[0]))
+        self.test_report = classification_report(self.test_set[1],self.modelo.predict(self.test_set[0]))
+    
+    def export_model(self):
+        path = venv + f'{self.representacion}-processing/{self.clave_modelo}-model.pkl'
+        with open(path, 'wb') as file:
+            pickle.dump(self,file)
 
 # En general, este archivo py no debería ser iniciado desde la raíz nunca, dado que es contraproducente. No obstante, lo haré acá para crear los multiprocs.
 if __name__ == '__main__':

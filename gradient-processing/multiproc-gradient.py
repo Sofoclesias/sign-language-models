@@ -1,6 +1,6 @@
 import datetime
 import warnings
-import QOL_funcs as qol
+import QoL as qol
 warnings.filterwarnings('ignore')
 
 def proc(path):
