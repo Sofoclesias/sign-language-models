@@ -12,6 +12,51 @@ venv = os.path.dirname((os.path.abspath(__file__)))
 # --------------
 # Funciones generales
 
+def create_multiproc_files(func: str,path: str):    
+    if os.path.exists(path):
+        pass
+    else:
+        commands = f"""\
+import datetime
+import warnings
+import QOL_funcs as qol
+warnings.filterwarnings('ignore')
+
+def proc(path):
+    ins = qol.{func}(path)
+    ins.to_csv(normalize=True)
+    qol.dump_object(ins,'dump.pkl')
+
+if __name__ == '__main__':
+    # Iniciar PyTorch con configuraciones
+    config = qol.device_configuration()
+
+    if config.processing_unit == 'cuda':
+        import torch.multiprocessing as multiproc
+        try:
+            multiproc.set_start_method('spawn')
+        except RuntimeError:
+            pass
+    else:
+        import multiprocessing as multiproc
+
+    train, test, _all = qol.retrieve_raw_paths()
+
+    tiempo_0 = datetime.datetime.today()
+    print('Procesamiento iniciado -',datetime.datetime.today())
+
+    with multiproc.Pool(processes=config.max_cores//2) as pool:
+        pool.map(proc, _all)
+        pool.close()
+        pool.join()
+
+    print('Procesamiento termina -', datetime.datetime.today())
+    print('Tiempo invertido: ',datetime.datetime.today()-tiempo_0)
+    """
+
+        with open(path, 'w') as file:
+            file.write(commands)
+
 def get_file_paths(folder_path):
     file_paths = []
     for root, dirs, files in os.walk(folder_path):
@@ -288,51 +333,6 @@ class hog_transform(image_preprocessing):
 
         ruta = r'\gradient-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         append_csv(venv + ruta, pd.DataFrame([feats], columns=columns))
-        
-def create_multiproc_files(func: str,path: str):    
-    if os.path.exists(path):
-        pass
-    else:
-        commands = f"""\
-import datetime
-import warnings
-import QOL_funcs as qol
-warnings.filterwarnings('ignore')
-
-def proc(path):
-    ins = qol.{func}(path)
-    ins.to_csv(normalize=True)
-    qol.dump_object(ins,'dump.pkl')
-
-if __name__ == '__main__':
-    # Iniciar PyTorch con configuraciones
-    config = qol.device_configuration()
-
-    if config.processing_unit == 'cuda':
-        import torch.multiprocessing as multiproc
-        try:
-            multiproc.set_start_method('spawn')
-        except RuntimeError:
-            pass
-    else:
-        import multiprocessing as multiproc
-
-    train, test, _all = qol.retrieve_raw_paths()
-
-    tiempo_0 = datetime.datetime.today()
-    print('Procesamiento iniciado -',datetime.datetime.today())
-
-    with multiproc.Pool(processes=config.max_cores//2) as pool:
-        pool.map(proc, _all)
-        pool.close()
-        pool.join()
-
-    print('Procesamiento termina -', datetime.datetime.today())
-    print('Tiempo invertido: ',datetime.datetime.today()-tiempo_0)
-    """
-
-        with open(path, 'w') as file:
-            file.write(commands)
 
 # En general, este archivo py no debería ser iniciado desde la raíz nunca, dado que es contraproducente. No obstante, lo haré acá para crear los multiprocs.
 if __name__ == '__main__':
