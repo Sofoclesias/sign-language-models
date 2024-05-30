@@ -1,4 +1,4 @@
-from multiprocessing import Lock
+import torch.multiprocessing as mp
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier
@@ -7,59 +7,85 @@ import pandas as pd
 import numpy as np
 import os
 import torch
-import functools
 import cv2
 import pickle
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["GLOG_minloglevel"] ="2"
 
 venv = os.path.dirname((os.path.abspath(__file__)))
 
 # --------------
 # Funciones generales
 
-def create_multiproc_files(func: str,path: str):    
-    if os.path.exists(path):
-        pass
+def create_multiproc_files(type: str):    
+    equiv = {'graph':'mediapipe_landmarks','gradient':'hog_transform'}
+    
+    if type not in list(equiv.keys()):
+        raise ValueError('Palabra clave no identificada.')
     else:
-        commands = f"""\
+        func = equiv[type]
+        path = f'{type}-processing/multiproc-{type}.py'
+        
+        if os.path.exists(path):
+            pass
+        else:
+            commands = f"""\
 import datetime
+import os
+import sys
+import shutil
+import torch.multiprocessing as mp
 import warnings
-import QoL as qol
 warnings.filterwarnings('ignore')
 
-def proc(path):
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ["GLOG_minloglevel"] ="3"
+
+def git_root(path):
+    current_path = os.path.abspath(path)
+    while current_path != os.path.dirname(current_path):
+        if os.path.isdir(os.path.join(current_path, '.git')):
+            return current_path
+        current_path = os.path.dirname(current_path)
+    return None
+
+def set_root():
+    current = os.getcwd()
+    sys.path.append(git_root(current))
+
+set_root()
+import QoL as qol
+config = qol.device_configuration()
+
+def proc(*args):
+    path, lock = args
     ins = qol.{func}(path)
-    ins.to_csv(normalize=True)
-    qol.dump_object(ins,'dump.pkl')
+    with lock:
+        ins.to_csv(normalize=True)
+        qol.dump_object(ins, 'dump.pkl')
+
+def main(paths):
+    with mp.Manager() as manager:
+        lock = manager.Lock()
+        with mp.Pool(processes=config.max_cores//2) as pool:
+            pool.starmap(proc, [(path, lock) for path in paths])
+            pool.close()
+            pool.join()
+    shutil.move('dump.pkl', r'{type}-processing/')
 
 if __name__ == '__main__':
-    # Iniciar PyTorch con configuraciones
-    config = qol.device_configuration()
-
-    if config.processing_unit == 'cuda':
-        import torch.multiprocessing as multiproc
-        try:
-            multiproc.set_start_method('spawn')
-        except RuntimeError:
-            pass
-    else:
-        import multiprocessing as multiproc
-
-    train, test, _all = qol.retrieve_raw_paths()
-
+    mp.set_start_method('spawn')
+    _, _, paths = qol.retrieve_raw_paths()
     tiempo_0 = datetime.datetime.today()
+    
     print('Procesamiento iniciado -',datetime.datetime.today())
+    main(paths)
+    print('Procesamiento terminado -', datetime.datetime.today())
+    print('Tiempo invertido: ',datetime.datetime.today()-tiempo_0)"""
 
-    with multiproc.Pool(processes=config.max_cores//2) as pool:
-        pool.map(proc, _all)
-        pool.close()
-        pool.join()
-
-    print('Procesamiento termina -', datetime.datetime.today())
-    print('Tiempo invertido: ',datetime.datetime.today()-tiempo_0)
-    """
-
-        with open(path, 'w') as file:
-            file.write(commands)
+            with open(path, 'w') as file:
+                file.write(commands)
 
 def get_file_paths(folder_path):
     file_paths = []
@@ -84,27 +110,19 @@ def dataset_exists():
 
 def load_model(keywords: dict):
     # keywords = {'tecnica': (graph,gradient,neural), 'modelo':(knn,rf,rn)}
-    path = venv + f'{keywords['tecnica']}-processing/{keywords['modelo']}-model.pkl'
+    path = venv + f'{keywords["tecnica"]}-processing/{keywords["modelo"]}-model.pkl'
     with open(path,'rb') as file:
         model = pickle.load(file)
     return model
+
+def select_lists(*args):
+    valid = [lst for lst in args if isinstance(lst.multi_hand_landmarks,list)]
     
-def locking(lock):
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            with lock:
-                return func(*args, **kwargs)
-        return wrapper
-    return decorator
+    if valid:
+        return valid[0]
+    else:
+        return None
 
-@locking(Lock())
-def append_csv(ruta: str, df: pd.DataFrame):
-    try:
-        df.to_csv(ruta, index=True, mode='a', header=not os.path.exists(ruta))
-    except: pass
-
-@locking(Lock())
 def dump_object(obj,filename):
     if os.path.exists(filename):
         with open(filename,'rb') as file:
@@ -124,8 +142,8 @@ class device_configuration:
         # Configura la unidad de procesamiento utilizada
         if preference is None:
             if torch.cuda.is_available():
-                self.processing_unit = 'cuda'
-                self.device = torch.device('cuda')
+                self.processing_unit = 'cuda:0'
+                self.device = torch.device('cuda:0')
             else:
                 self.processing_unit = 'cpu'
                 self.device = torch.device('cpu')
@@ -137,7 +155,7 @@ class device_configuration:
         torch.cuda.device(self.device)
 
         # Consolida como variable de interés los cores máximos
-        if self.processing_unit=='cuda':
+        if self.processing_unit=='cuda:0':
             self.max_cores = torch.cuda.get_device_properties(0).multi_processor_count
         else:
             self.max_cores = os.cpu_count()
@@ -164,8 +182,6 @@ class image_preprocessing:
             if to_self:
                 self.image, self.color = result
                 self.size = self.image.shape
-                                    
-                return result
             else:
                 image, color = result
                 new_instance = image_preprocessing(image=image,color=color)
@@ -190,8 +206,44 @@ class image_preprocessing:
     
     @__to_self
     def blur_image(self):
-        blurred_image = cv2.GaussianBlur(self.image)
-        return blurred_image, self.color
+        blurred_image = cv2.GaussianBlur(self.image,(7,7),0)
+        return blurred_image, self.color    
+    
+    @__to_self
+    def manual_adjust_luminosity(self,brightness: int = 0,contrast: int = 0):
+        if brightness==0 and contrast==0:
+            image = self.image
+        else:
+            if brightness != 0:
+                if brightness > 0:
+                    shadow = brightness
+                    highlight = 255
+                else:
+                    shadow = 0
+                    highlight = 255 + brightness
+                
+                alpha_b = (highlight - shadow) / 255
+                image = cv2.addWeighted(self.image, alpha_b, self.image, 0, shadow)
+            
+            if contrast != 0:
+                f = 131 * (contrast + 127) / (127 * (131 - contrast))
+                alpha_c = f
+                gamma_c = 127 * (1 - f)
+                image = cv2.addWeighted(self.image, alpha_c, self.image, 0, gamma_c)
+        
+        return image, self.color
+    
+    @__to_self
+    def auto_adjust_luminosity(self):
+        gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
+        avg_bright = np.mean(gray)
+        std_contrast = np.std(gray)
+        
+        brightness = int(128 - avg_bright)
+        contrast = int((std_contrast / 64.0) * 127.0)
+        
+        im = self.manual_adjust_luminosity(brightness,contrast,to_self=False)
+        return im.image, self.color
     
     def edge_detection(self):
         gray: image_preprocessing = self.to_grayscale(to_self=False)
@@ -211,9 +263,9 @@ class image_preprocessing:
         x, y, w, h = cv2.boundingRect(largest_contour)
     
         # Expandirlo para cubrir toda la palma (padding manualmente ajustable)
-        padding = 30
-        x = max(0, x - padding)
-        y = max(0, y - padding)
+        padding = 5
+        x = max(1, x - padding)
+        y = max(1, y - padding)
         w = min(self.image.shape[1] - x, w + 2 * padding)
         h = min(self.image.shape[0] - y, h + 2 * padding)  
     
@@ -242,6 +294,7 @@ class mediapipe_landmarks(image_preprocessing):
         import mediapipe as mp
         super().__init__(image_path,color)
         self.image_path = image_path
+        #self.letter = self.image_path.split('\\')[-2]
         
         # Iniciar el framework de reconocimiento de coordenadas
         mp_hands = mp.solutions.hands
@@ -249,12 +302,13 @@ class mediapipe_landmarks(image_preprocessing):
         mp_drawing = mp.solutions.drawing_utils
 
         # Leer y procesar la imagen
-        image_rgb = self.to_rgb(to_self=False)
-        results = hands.process(self.__image_rgb)
+        image_rgb: image_preprocessing = self.to_rgb(to_self=False)
+        
+        results = select_lists(hands.process(image_rgb.image), hands.process(self.original_image))
         self.coords: np.array = np.empty((0, 2))
 
-        # Si hay resultados para las imágenes
-        if results.multi_hand_landmarks:
+        # Si hay resultados para las imágenes        
+        if results is not None:
             self.results: bool = True
             # Recuperar nodos de la imagen
             for hand_landmarks in results.multi_hand_landmarks:
@@ -263,14 +317,14 @@ class mediapipe_landmarks(image_preprocessing):
                     h, w, c = self.image.shape
                     cx, cy = int(landmark.x * w), int(landmark.y * h)
                     self.coords = np.vstack((self.coords, np.array([cx, cy]).reshape(1, -1)))
-                mp_drawing.draw_landmarks(image_rgb, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                mp_drawing.draw_landmarks(image_rgb.image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
         else:
             self.results: bool = False
             self.coords = np.zeros((21, 2))
 
         hands.close()
         
-        self.image = image_rgb
+        self.image = image_rgb.image
         self.__is_normalized: bool = False
 
     def visualize_landmarks(self):     
@@ -297,8 +351,10 @@ class mediapipe_landmarks(image_preprocessing):
         for i in range(21):
             columns.extend([f"x_{i}", f"y_{i}"])
 
-        ruta = r'\graph-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
-        append_csv(venv + ruta, pd.DataFrame([coords], columns=columns))
+        ruta = venv + r'\graph-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
+        df = pd.DataFrame([coords],columns=columns)
+        
+        df.to_csv(ruta, index=True, mode='a', header=not os.path.exists(ruta))
         
     def extract_values (self,normalize: bool = True):
         if normalize==True and self.__is_normalized==False:
@@ -340,11 +396,11 @@ class hog_transform(image_preprocessing):
         else: pass
         
         feats = [self.image_path.split('\\')[-2]] + self.hog_features.flatten().tolist()
+        columns = ['letra'] + [f'cell_{i}' for i in range(len(feats)-1)]
+        df = pd.DataFrame([feats],columns=columns)
+        ruta = venv + r'\gradient-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         
-        columns = ['letra'] + [f'cell_{i}' for i in range(len(feats))]
-
-        ruta = r'\gradient-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
-        append_csv(venv + ruta, pd.DataFrame([feats], columns=columns))
+        df.to_csv(ruta, index=True, mode='a', header=not os.path.exists(ruta))
         
     def extract_values (self,normalize: bool = True):
         if normalize==True and self.__is_normalized==False:
@@ -432,8 +488,5 @@ class model_trainer:
 
 # En general, este archivo py no debería ser iniciado desde la raíz nunca, dado que es contraproducente. No obstante, lo haré acá para crear los multiprocs.
 if __name__ == '__main__':
-    # Graph
-    create_multiproc_files('mediapipe_landmarks','graph-processing/multiproc-graph.py')
-    
-    # Gradient
-    create_multiproc_files('hog_transform','gradient-processing/multiproc-gradient.py')
+    create_multiproc_files('graph')
+    create_multiproc_files('gradient')
