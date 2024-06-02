@@ -25,20 +25,27 @@ def create_files(type: str):
         raise ValueError('Palabra clave no identificada.')
     else:
         func = equiv[type]
-        path = f'{type}-processing/multiproc-{type}.py'
+        path_py = f'{type}-processing/multiproc-{type}.py'
+        path_ipynb = f'{type}-processing/modeller-{type}.ipynb'
         
-        if os.path.exists(path):
+        # Creación de archivo multiproc
+        if os.path.exists(path_py):
             pass
         else:
-            # Creación de archivo multiproc
             with open('samples\multiproc.txt','r') as file:
                 commands = eval(file.read())
-            with open(path, 'w') as file:
+            with open(path_py, 'w') as file:
                 file.write(commands)
-                
+        
+        if os.path.exists(path_ipynb):
+            pass
+        else: 
             # Creación de archivo training
-            
-
+            with open('samples\modeller.txt','r') as file:
+                commands = file.read()
+            with open(path_ipynb,'w') as file:
+                file.write(commands)
+                        
 def get_file_paths(folder_path):
     file_paths = []
     for root, dirs, files in os.walk(folder_path):
@@ -598,3 +605,4 @@ class model_trainer:
 if __name__ == '__main__':
     create_files('graph')
     create_files('gradient')
+    create_files('neural')

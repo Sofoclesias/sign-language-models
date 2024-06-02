@@ -6,5 +6,5 @@ synthetic-asl-alphabet/
 __pycache__/
 **/dump.pkl
 **/insights.ipynb
-**/processed_data/
 pruebas.ipynb
+backup/
