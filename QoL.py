@@ -2,7 +2,7 @@ import torch.multiprocessing as mp
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from sklearn.preprocessing import LabelEncoder
 import pandas as pd
 import numpy as np
 import os
@@ -18,7 +18,7 @@ venv = os.path.dirname((os.path.abspath(__file__)))
 # --------------
 # Funciones generales
 
-def create_multiproc_files(type: str):    
+def create_files(type: str):    
     equiv = {'graph':'mediapipe_landmarks','gradient':'hog_transform'}
     
     if type not in list(equiv.keys()):
@@ -30,62 +30,14 @@ def create_multiproc_files(type: str):
         if os.path.exists(path):
             pass
         else:
-            commands = f"""\
-import datetime
-import os
-import sys
-import shutil
-import torch.multiprocessing as mp
-import warnings
-warnings.filterwarnings('ignore')
-
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ["GLOG_minloglevel"] ="3"
-
-def git_root(path):
-    current_path = os.path.abspath(path)
-    while current_path != os.path.dirname(current_path):
-        if os.path.isdir(os.path.join(current_path, '.git')):
-            return current_path
-        current_path = os.path.dirname(current_path)
-    return None
-
-def set_root():
-    current = os.getcwd()
-    sys.path.append(git_root(current))
-
-set_root()
-import QoL as qol
-config = qol.device_configuration()
-
-def proc(*args):
-    path, lock = args
-    ins = qol.{func}(path)
-    with lock:
-        ins.to_csv(normalize=True)
-        qol.dump_object(ins, 'dump.pkl')
-
-def main(paths):
-    with mp.Manager() as manager:
-        lock = manager.Lock()
-        with mp.Pool(processes=config.max_cores//2) as pool:
-            pool.starmap(proc, [(path, lock) for path in paths])
-            pool.close()
-            pool.join()
-    shutil.move('dump.pkl', r'{type}-processing/')
-
-if __name__ == '__main__':
-    mp.set_start_method('spawn')
-    _, _, paths = qol.retrieve_raw_paths()
-    tiempo_0 = datetime.datetime.today()
-    
-    print('Procesamiento iniciado -',datetime.datetime.today())
-    main(paths)
-    print('Procesamiento terminado -', datetime.datetime.today())
-    print('Tiempo invertido: ',datetime.datetime.today()-tiempo_0)"""
-
+            # Creación de archivo multiproc
+            with open('samples\multiproc.txt','r') as file:
+                commands = eval(file.read())
             with open(path, 'w') as file:
                 file.write(commands)
+                
+            # Creación de archivo training
+            
 
 def get_file_paths(folder_path):
     file_paths = []
@@ -134,6 +86,23 @@ def dump_object(obj,filename):
     with open(filename,'wb') as file:
         pickle.dump(data,file)
 
+def show_CM(CM: pd.DataFrame,way='pandas-style'):
+    if way=='pandas-style':
+        stylish = CM.style.background_gradient(cmap='coolwarm').set_precision(2)
+        return stylish
+    elif way=='seaborn':
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        plt.figure(figsize=(10, 7))
+        sns.heatmap(CM, annot=True, fmt="d", cmap="coolwarm")
+        plt.title('Matriz de Confusión')
+        plt.xlabel('Predicción')
+        plt.ylabel('Actual')
+        plt.show()
+    else:
+        raise AttributeError("'way' debe ser o 'pandas-style' (predeterminado) o 'seaborn'." )
+
 # --------------
 # Transformación de imágenes
 
@@ -177,7 +146,7 @@ class image_preprocessing:
     
     def __to_self(func):
         def wrapper(self, *args, **kwargs):
-            to_self = kwargs.pop('to_self', False)
+            to_self = kwargs.pop('to_self', False) # Creo que es más intuitivo que to_self sea 'True' por defecto. Luego lo cambio
             result = func(self, *args, **kwargs)
             if to_self:
                 self.image, self.color = result
@@ -251,6 +220,37 @@ class image_preprocessing:
         edges = cv2.Canny(blurred.image,50,150)
         return edges
         
+    @__to_self
+    def edge_enhancement(self,contrast: str = 'hard'):
+        # Filtro de convolución de 3x3
+        if contrast=='hard':
+            kernel = np.array([[-1, -1, -1],
+                               [-1, 10, -1],
+                               [-1, -1, -1]])
+        elif contrast=='soft':
+            kernel = np.array([[0,-1,0],
+                              [-1,5,-1],
+                              [0,-1,0]])
+        else:
+            raise ValueError('Tipo de contraste no aceptado.')
+        
+        enhanced_image = cv2.filter2D(self.image, -1, kernel)
+        return enhanced_image
+        
+    @__to_self
+    def histogram_equalization(self,contrast: str = 'global'):
+        if contrast=='global': # Solo Histogram Equalization
+            return cv2.equalizeHist(self.image)
+        elif contrast=='adaptive': # Adaptive Histogram Equalization
+            eq = cv2.createCLAHE(clipLimit=40.0,tileGridSize=(8,8))
+        elif contrast=='limited-adaptive': # Contrast Limited Adaptive Histogram Equalization
+            eq = cv2.createCLAHE(clipLimit=2.0,tileGridSize=(8,8))
+        else:
+            raise ValueError('Tipo de contraste no aceptado')
+    
+        equalized_image = eq.apply(self.image)
+        return equalized_image
+    
     def __find_hand_rectangle(self):
         # Detectar los bordes
         edges = self.edge_detection()
@@ -294,7 +294,7 @@ class mediapipe_landmarks(image_preprocessing):
         import mediapipe as mp
         super().__init__(image_path,color)
         self.image_path = image_path
-        #self.letter = self.image_path.split('\\')[-2]
+        self.letter = self.image_path.split('\\')[-2]
         
         # Iniciar el framework de reconocimiento de coordenadas
         mp_hands = mp.solutions.hands
@@ -302,6 +302,9 @@ class mediapipe_landmarks(image_preprocessing):
         mp_drawing = mp.solutions.drawing_utils
 
         # Leer y procesar la imagen
+        self.to_rgb(to_self=True)
+        
+        
         image_rgb: image_preprocessing = self.to_rgb(to_self=False)
         
         results = select_lists(hands.process(image_rgb.image), hands.process(self.original_image))
@@ -317,14 +320,13 @@ class mediapipe_landmarks(image_preprocessing):
                     h, w, c = self.image.shape
                     cx, cy = int(landmark.x * w), int(landmark.y * h)
                     self.coords = np.vstack((self.coords, np.array([cx, cy]).reshape(1, -1)))
-                mp_drawing.draw_landmarks(image_rgb.image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                mp_drawing.draw_landmarks(self.image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
         else:
             self.results: bool = False
             self.coords = np.zeros((21, 2))
 
         hands.close()
         
-        self.image = image_rgb.image
         self.__is_normalized: bool = False
 
     def visualize_landmarks(self):     
@@ -345,11 +347,12 @@ class mediapipe_landmarks(image_preprocessing):
             self.normalize_coords()
         else: pass
         
-        coords = [self.image_path.split('\\')[-2]] + self.coords.flatten().tolist()
+        coords = [self.image_path.split('\\')[-2]] + self.coords.flatten().tolist() + [self.image_path]
         
         columns = ['letra']
         for i in range(21):
             columns.extend([f"x_{i}", f"y_{i}"])
+        columns += ['origen']
 
         ruta = venv + r'\graph-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         df = pd.DataFrame([coords],columns=columns)
@@ -412,33 +415,87 @@ class hog_transform(image_preprocessing):
 
 # Acá iría la clase de CNN
 
-
-
 class model_trainer:
-    def __init__(self,keywords: dict):
+    def __init__(self, tecnica: str, modelo: str):
         # keywords = {'técnica': (graph,gradient) , 'modelo':(knn,rf)}
         # Claves
-        if keywords['técnica'] in ['graph','gradient','neural'] and keywords['modelo'] in ['knn','rf','rn']:
-            self.representacion = keywords['técnica']
-            self.clave_modelo = keywords['modelo']
+        if tecnica in ['graph','gradient','neural'] and modelo in ['knn','rf','ann']:
+            self.representacion = tecnica
+            self.clave_modelo = modelo
         else: 
             raise ValueError('Técnica de representación o modelo no identificado.')
         
-        # Conjuntos de entrenamiento y prueba
-        train_set = pd.DataFrame(venv + f'{self.representacion}-processing/processed_data/Train_Alphabet.csv')
-        test_set = pd.DataFrame(venv + f'{self.representacion}-processing/processed_data/Test_Alphabet.csv')
+        self.dataset_path = {'train':os.path.join(venv, f'{self.representacion}-processing\processed_data\Train_Alphabet.csv'),
+                             'test':os.path.join(venv, f'{self.representacion}-processing\processed_data\Test_Alphabet.csv')}
 
-        self.train_set = [train_set.iloc[:,1:],train_set.iloc[:,0]]
-        self.test_set = [test_set.iloc[:,1:],test_set.iloc[:,0]]
+        # Conjuntos de entrenamiento y prueba
+        train_set = pd.read_csv(self.dataset_path['train'],sep=',', encoding='utf-8',on_bad_lines='skip',usecols=lambda column: column not in ['Unnamed: 0','origen' ,'    '])
+        test_set = pd.read_csv(self.dataset_path['test'],sep=',', encoding='utf-8',on_bad_lines='skip',usecols=lambda column: column not in ['Unnamed: 0','origen' ,'    '])
+
+        # Prueba de errores
+        lines_train = sum(1 for _ in open(self.dataset_path['train']))
+        lines_test = sum(1 for _ in open(self.dataset_path['test']))
+        train_corr = train_set.isna().any(axis=1).sum()
+        test_corr = test_set.isna().any(axis=1).sum()
+        miss_T = train_set.dropna(axis=0).iloc[:,1:].apply(pd.to_numeric, errors='coerce').isna().any(axis=1)
+        miss_t = test_set.dropna(axis=0).iloc[:,1:].apply(pd.to_numeric, errors='coerce').isna().any(axis=1)        
         
-        # Definición de los modelos e hiperparámetros
+        if (lines_train > train_set.shape[0] or lines_test > test_set.shape[0] or train_corr>0 or test_corr>0 or miss_T.sum()>0 or miss_t.sum()>0):
+            print('----- Sumilla de errores -----\n')
+            if (lines_train > train_set.shape[0] or lines_test > test_set.shape[0]):
+                print(f'Se han encontrado {lines_train - train_set.shape[0]} errores de lectura en train y {lines_test - test_set.shape[0]} en test. Borrando.')
+            if (train_corr>0 or test_corr>0):
+                print(f'Se han encontrado {train_corr} filas corruptas en train y {test_corr} en test. Borrando.')
+                train_set.dropna(axis=0,inplace=True)
+                test_set.dropna(axis=0,inplace=True)
+            if (miss_T.sum()>0 or miss_t.sum()>0):
+                print(f'Se han encontrado {miss_T.sum()} filas con letras mal posicionadas en train y {miss_t.sum()} en test. Borrando.')
+                try:
+                    train_set.drop(index=miss_T[miss_T==True].index,inplace=True)
+                except: pass
+                try:
+                    test_set.drop(index=miss_t[miss_t==True].index,inplace=True)
+                except: pass
+            print('\n------------------------------')
+                
+        # Almacenamiento de datasets
+        X_train, Y_train = train_set.iloc[:,1:].apply(pd.to_numeric, errors='coerce'), train_set.iloc[:,0].apply(lambda x: str(x.decode('utf-8')).strip("b' ") if isinstance(x, bytes) else str(x).strip("b' ")).astype('str').apply(lambda x: x.strip())
+        X_test, Y_test = test_set.iloc[:,1:].apply(pd.to_numeric, errors='coerce'), test_set.iloc[:,0].apply(lambda x: str(x.decode('utf-8')).strip("b' ") if isinstance(x, bytes) else str(x).strip("b' ")).astype('str').apply(lambda x: x.strip())
+        
+        self.train_set = [X_train,Y_train]
+        self.test_set = [X_test,Y_test]
+        
+        # Definición de atributos auxiliares
+        self.label = LabelEncoder()
         self.modelo = None
         self.param_distributions = None
         self.__is_trained = False
-        self.train_report = None
         self.test_report = None
+        self.CM = None
+        self.AUC = None
         
-    def setup_model(self):
+    def class_counts(self):  
+        train_count = self.train_set[1].value_counts().reset_index()
+        train_count.columns = ['Letra', 'En train']
+        
+        test_count = self.test_set[1].value_counts().reset_index()
+        test_count.columns = ['Letra', 'En test']
+        
+        train_count.Letra = train_count.Letra.astype(str)
+        test_count.Letra = test_count.Letra.astype(str)
+        
+        consolidate = pd.merge(train_count, test_count, on='Letra', how='outer')
+        consolidate.fillna(0,inplace=True)
+        
+        consolidate['En train'] = consolidate['En train'].astype(int)
+        consolidate['En test'] = consolidate['En test'].astype(int)
+        
+        consolidate.sort_values(by='Letra', inplace=True)
+        consolidate.reset_index(drop=True, inplace=True)
+            
+        return consolidate
+        
+    def __setup_model(self):
         if self.clave_modelo == 'knn':
             self.modelo = KNeighborsClassifier()
             self.param_distributions = {
@@ -455,38 +512,89 @@ class model_trainer:
                 'min_samples_split': np.arange(2, 11),
                 'min_samples_leaf': np.arange(1, 11)
             }
-        elif self.clave_modelo == 'rn':
+        elif self.clave_modelo == 'ann':
             pass
-        
-    def train_model(self):
-        # Configurar el modelo
-        self.setup_model()
-        
-        # Configurar RandomizedSearchCV
-        random_search = RandomizedSearchCV(
-            estimator=self.modelo,
-            param_distributions=self.param_distributions,
-            n_iter=100, # Por ajustar
-            cv = 5, # Por ajustar
-            verbose = 2,
-            random_state=42,
-            n_jobs=-1
-        )
-        
-        random_search.fit(*self.train_set)
-        self.modelo = random_search.best_estimator_
-        self.__is_trained = True
-        
-        # Reportes de error
-        self.train_report = classification_report(self.train_set[1],self.modelo.predict(self.train_set[0]))
-        self.test_report = classification_report(self.test_set[1],self.modelo.predict(self.test_set[0]))
     
+    def train_model(self):
+        if not self.__is_trained:
+            # Configurar el modelo
+            self.__setup_model()
+            
+            X_train = self.train_set[0]
+            Y_train = self.label.fit_transform(self.train_set[1])
+            
+            # Configurar RandomizedSearchCV
+            random_search = RandomizedSearchCV(
+                estimator=self.modelo,
+                param_distributions=self.param_distributions,
+                n_iter = 100, # Por ajustar
+                cv = 5, # Por ajustar
+                verbose = 2,
+                random_state=42,
+                n_jobs=-1
+            )
+            
+            random_search.fit(X_train,Y_train)
+            self.modelo = random_search.best_estimator_
+            self.__is_trained = True
+        else:
+            print('Ya está entrenado el modelo.')
+        
+    def generate_error_reports(self):
+        if not self.__is_trained:
+            raise SystemError('No hay modelo entrenado.')
+        else:    
+            from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve, auc, classification_report
+            from sklearn.preprocessing import label_binarize
+            
+            # Seteo de variables
+            y_test = self.test_set[1]
+            y_pred = self.predict(self.test_set[0])
+            y_prob = self.modelo.predict_proba(self.test_set[0])
+            
+            # Reportes generales de error
+            self.test_report = classification_report(y_test,y_pred)
+            self.CM = pd.DataFrame(confusion_matrix(y_test,y_pred),
+                                    index=self.test_set[1].unique(),columns=self.test_set[1].unique())
+
+            # ROC AUC de cada clase
+            y_bintest = label_binarize(y_test,
+                                       classes=[letra for letra in np.unique(y_test)])
+            fpr = dict()
+            tpr = dict()
+            roc_auc = dict()
+            
+            for i in range(y_bintest.shape[1]):
+                fpr[i], tpr[i], _ = roc_curve(y_bintest[:,i],y_prob[:,i])
+                roc_auc[i] = auc(fpr[i],tpr[i])
+                
+            # ROC AUC: media ponderada
+            roc_auc_ovr = roc_auc_score(y_bintest, y_prob, multi_class='ovr')
+            
+            # ROC AUC: macro
+            roc_auc_ovo = roc_auc_score(y_bintest,y_prob,multi_class='ovo')
+            
+            # Consolidación
+            self.AUC = {
+                'perclass':roc_auc,
+                'ovr':roc_auc_ovr,
+                'ovo':roc_auc_ovo
+            }
+            
     def export_model(self):
-        path = venv + f'{self.representacion}-processing/{self.clave_modelo}-model.pkl'
+        path = os.path.join(venv,f'{self.representacion}-processing/models/{self.clave_modelo}-model.pkl')
         with open(path, 'wb') as file:
             pickle.dump(self,file)
-
+            
+    def predict(self, X_test):
+        if not self.__is_trained:
+            raise ValueError('Modelo no entrenado.')
+        else:
+            # Como está en Label, la predicción arrojaría un número.
+            # Con este nuevo método de reemplazo, te arroja la letra directamente.
+            return self.label.inverse_transform(self.modelo.predict(X_test))
+        
 # En general, este archivo py no debería ser iniciado desde la raíz nunca, dado que es contraproducente. No obstante, lo haré acá para crear los multiprocs.
 if __name__ == '__main__':
-    create_multiproc_files('graph')
-    create_multiproc_files('gradient')
+    create_files('graph')
+    create_files('gradient')
