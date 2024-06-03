@@ -1,4 +1,3 @@
-import torch.multiprocessing as mp
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier
@@ -65,7 +64,7 @@ def dataset_exists():
         pass
     else:
         import opendatasets as od
-        od.download("https://www.kaggle.com/datasets/lexset/synthetic-asl-alphabet",)
+        od.download("https://www.kaggle.com/datasets/lexset/synthetic-asl-alphabet")
 
 def load_model(keywords: dict):
     # keywords = {'tecnica': (graph,gradient,neural), 'modelo':(knn,rf,rn)}
@@ -75,7 +74,7 @@ def load_model(keywords: dict):
     return model
 
 def select_lists(*args):
-    valid = [lst for lst in args if isinstance(lst.multi_hand_landmarks,list)]
+    valid = [(lst,i) for lst,i in enumerate(args) if isinstance(lst.multi_hand_landmarks,list)]
     
     if valid:
         return valid[0]
@@ -295,7 +294,13 @@ class image_preprocessing:
         segmented = self.image * mask2[:,:,np.newaxis]
         
         return segmented, self.color
-
+    
+    @__to_self
+    def adaptive_crop(self):
+        x,y,w,h = self.__find_hand_rectangle()
+        cropped_image = self.image[y:y+h,x:x+w]
+        return cropped_image, self.color
+        
 class mediapipe_landmarks(image_preprocessing):
     def __init__(self, image_path, color: str = 'bgr'):
         import mediapipe as mp
@@ -311,18 +316,32 @@ class mediapipe_landmarks(image_preprocessing):
         # Leer y procesar la imagen
         self.to_rgb(to_self=True)
         
+        # Al menos una de estas versiones debe funcionar
+        image_soft_enhanced = self.edge_enhancement(contrast='soft',to_self=False)
+        image_hard_enhanced = self.edge_enhancement(contrast='hard',to_self=False)
+        rgb_equalized = self.histogram_equalization(contrast='adaptive',to_self=False)
+        equal_soft_enhanced = rgb_equalized.edge_enhancement(contrast='soft',to_self=False)
+        equal_hard_enhanced = rgb_equalized.edge_enhancement(contrast='hard',to_self=False)
         
-        image_rgb: image_preprocessing = self.to_rgb(to_self=False)
-        
-        results = select_lists(hands.process(image_rgb.image), hands.process(self.original_image))
+        # En principio espero que no se usen todas. Si solo con las enhanced ya funciona bien, corto hasta ahí.
+        # Para eso está el index.
+        results, index = select_lists(hands.process(self.image),                    # RGB
+                                      hands.process(self.original_image),           # BGR
+                                      hands.process(image_soft_enhanced.image),     # RGB Soft Edge Enhancement
+                                      hands.process(image_hard_enhanced.image),     # RGB Hard Edge Enhancement
+                                      hands.process(rgb_equalized.image),           # RGB adaptive equalized contrast
+                                      hands.process(equal_soft_enhanced.image),     # * Soft Edge Enhancement
+                                      hands.process(equal_hard_enhanced.image)      # * Hard Edge Enhancement
+                                      )
         self.coords: np.array = np.empty((0, 2))
+        self.index = index
 
         # Si hay resultados para las imágenes        
         if results is not None:
             self.results: bool = True
             # Recuperar nodos de la imagen
             for hand_landmarks in results.multi_hand_landmarks:
-                for idx, landmark in enumerate(hand_landmarks.landmark):
+                for _, landmark in enumerate(hand_landmarks.landmark):
                     # Extraer las coordenadas y guardarlas en lista
                     h, w, c = self.image.shape
                     cx, cy = int(landmark.x * w), int(landmark.y * h)
@@ -333,7 +352,6 @@ class mediapipe_landmarks(image_preprocessing):
             self.coords = np.zeros((21, 2))
 
         hands.close()
-        
         self.__is_normalized: bool = False
 
     def visualize_landmarks(self):     
@@ -380,12 +398,13 @@ class hog_transform(image_preprocessing):
         self.image_path = image_path
 
         # Preprocesamiento
-        self.resize_image(64,to_self=True)
+        
         self.segment_image(to_self=True)
+        self.resize_image(64,to_self=True)
         self.to_grayscale(to_self=True)
         
         # Extracción de características con HOG
-        self.hog_features, self.hog_image = hog(self.image, orientations=9,pixels_per_cell=(8,8), cells_per_block=(2,2),block_norm='L2-Hys',visualize=True)        
+        self.hog_features, self.hog_image = hog(self.image, orientations=9,pixels_per_cell=(6,6), cells_per_block=(3,3),block_norm='L2',visualize=True)        
         self.__is_normalized: bool = False
     
     def visualize_gradients(self):
@@ -601,8 +620,9 @@ class model_trainer:
             # Con este nuevo método de reemplazo, te arroja la letra directamente.
             return self.label.inverse_transform(self.modelo.predict(X_test))
         
-# En general, este archivo py no debería ser iniciado desde la raíz nunca, dado que es contraproducente. No obstante, lo haré acá para crear los multiprocs.
+# Este archivo .py solo debería ser iniciado la primera vez que se haga el processing.
 if __name__ == '__main__':
+    dataset_exists()
     create_files('graph')
     create_files('gradient')
     create_files('neural')
