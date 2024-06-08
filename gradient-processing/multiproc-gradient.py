@@ -6,8 +6,7 @@
 import datetime
 import os
 import sys
-import shutil
-import torch.multiprocessing as mp
+import multiprocessing as mp
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -28,23 +27,23 @@ def set_root():
 
 set_root()
 import QoL as qol
-config = qol.device_configuration()
 
 def proc(*args):
     path, lock = args
-    ins = qol.hog_transform(path)
-    with lock:
-        ins.to_csv(normalize=True)
-        qol.dump_object(ins, 'dump.pkl')
+    try:
+        ins = qol.hog_transform(path)
+        with lock:
+            ins.to_csv(normalize=True)
+    except:
+        pass
 
 def main(paths):
     with mp.Manager() as manager:
         lock = manager.Lock()
-        with mp.Pool(processes=config.max_cores//2) as pool:
+        with mp.Pool(processes=8) as pool:
             pool.starmap(proc, [(path, lock) for path in paths])
             pool.close()
             pool.join()
-    shutil.move('dump.pkl', r'gradient-processing/')
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')

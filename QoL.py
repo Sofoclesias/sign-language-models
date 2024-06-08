@@ -54,8 +54,8 @@ def get_file_paths(folder_path):
     return file_paths
 
 def retrieve_raw_paths():
-    train = get_file_paths(venv + r'\synthetic-asl-alphabet\Train_Alphabet')
-    test = get_file_paths(venv + r'\synthetic-asl-alphabet\Test_Alphabet')
+    train = get_file_paths(venv + r'\preprocessed-images\Train_Alphabet')
+    test = get_file_paths(venv + r'\preprocessed-images\Test_Alphabet')
     _all = [*train, *test]
     return train, test, _all
 
@@ -72,14 +72,6 @@ def load_model(keywords: dict):
     with open(path,'rb') as file:
         model = pickle.load(file)
     return model
-
-def select_lists(args):
-    valid = [(i,lst) for i,lst in enumerate(args) if isinstance(lst.multi_hand_landmarks,list)]
-    
-    if valid:
-        return valid[0]
-    else:
-        return None,None
 
 def dump_object(obj,filename):
     if os.path.exists(filename):
@@ -320,26 +312,11 @@ class mediapipe_landmarks(image_preprocessing):
 
         # Leer y procesar la imagen
         self.to_rgb(to_self=True)
-        
-        # Al menos una de estas versiones debe funcionar
-        image_soft_enhanced = self.edge_enhancement(contrast='soft',to_self=False)
-        image_hard_enhanced = self.edge_enhancement(contrast='hard',to_self=False)
-        rgb_equalized = self.histogram_equalization(contrast='adaptive',to_self=False)
-        equal_soft_enhanced = rgb_equalized.edge_enhancement(contrast='soft',to_self=False)
-        equal_hard_enhanced = rgb_equalized.edge_enhancement(contrast='hard',to_self=False)
-        
-        # En principio espero que no se usen todas. Si solo con las enhanced ya funciona bien, corto hasta ahí.
-        # Para eso está el index.
-        index, results = select_lists([hands.process(self.image),                   # RGB
-                                      hands.process(self.original_image),           # BGR
-                                      hands.process(image_soft_enhanced.image)     # RGB Soft Edge Enhancement
-                                      
-                                      ])
+        results = hands.process(self.image)
         self.coords: np.array = np.empty((0, 2))
-        self.index = index
 
         # Si hay resultados para las imágenes        
-        if results is not None:
+        if results.multi_hand_landmarks:
             self.results: bool = True
             # Recuperar nodos de la imagen
             for hand_landmarks in results.multi_hand_landmarks:
@@ -374,12 +351,11 @@ class mediapipe_landmarks(image_preprocessing):
             self.normalize_coords()
         else: pass
         
-        coords = [self.image_path.split('\\')[-2]] + self.coords.flatten().tolist() + [self.image_path]
+        coords = [self.image_path.split('\\')[-2]] + self.coords.flatten().tolist()
         
         columns = ['letra']
         for i in range(21):
             columns.extend([f"x_{i}", f"y_{i}"])
-        columns += ['origen']
 
         ruta = venv + r'\graph-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         df = pd.DataFrame([coords],columns=columns)
@@ -400,8 +376,6 @@ class hog_transform(image_preprocessing):
         self.image_path = image_path
 
         # Preprocesamiento
-        
-        self.segment_image(to_self=True)
         self.resize_image(64,to_self=True)
         self.to_grayscale(to_self=True)
         
