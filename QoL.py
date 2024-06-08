@@ -54,8 +54,8 @@ def get_file_paths(folder_path):
     return file_paths
 
 def retrieve_raw_paths():
-    train = get_file_paths(venv + r'\synthetic-asl-alphabet\Train_Alphabet')
-    test = get_file_paths(venv + r'\synthetic-asl-alphabet\Test_Alphabet')
+    train = get_file_paths(venv + r'\preprocessed-images\Train_Alphabet')
+    test = get_file_paths(venv + r'\preprocessed-images\Test_Alphabet')
     _all = [*train, *test]
     return train, test, _all
 
@@ -351,12 +351,11 @@ class mediapipe_landmarks(image_preprocessing):
             self.normalize_coords()
         else: pass
         
-        coords = [self.image_path.split('\\')[-2]] + self.coords.flatten().tolist() + [self.image_path]
+        coords = [self.image_path.split('\\')[-2]] + self.coords.flatten().tolist()
         
         columns = ['letra']
         for i in range(21):
             columns.extend([f"x_{i}", f"y_{i}"])
-        columns += ['origen']
 
         ruta = venv + r'\graph-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         df = pd.DataFrame([coords],columns=columns)

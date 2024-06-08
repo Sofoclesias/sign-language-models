@@ -1,11 +1,19 @@
+# Archivos que el IDE genera. No necesarios para el repositorio.
 .idea/
 .vscode/
-synthetic-asl-alphabet/
 **/.ipynb_checkpoints/
-**/kaggle.json
 __pycache__/
-dump.pkl
-backup/
 .venv/
-preprocessed-images/Test_Alphabet/
-preprocessed-images/Train_Alphabet/
+
+# Credenciales de terceros y de confidencialidad
+backup/
+synthetic-asl-alphabet/
+**/kaggle.json
+
+# Modelos y datasets procesados. Estos están disponibles en releases.
+**/models/
+**/processed_data/
+**/Test_Alphabet/
+**/Train_Alphabet/
+Test_Alphabet.csv
+Train_Alphabet.csv
