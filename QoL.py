@@ -44,7 +44,7 @@ def create_files(type: str):
                 commands = file.read()
             with open(path_ipynb,'w') as file:
                 file.write(commands)
-                        
+                  
 def get_file_paths(folder_path):
     file_paths = []
     for root, dirs, files in os.walk(folder_path):
@@ -73,13 +73,13 @@ def load_model(keywords: dict):
         model = pickle.load(file)
     return model
 
-def select_lists(*args):
-    valid = [(lst,i) for lst,i in enumerate(args) if isinstance(lst.multi_hand_landmarks,list)]
+def select_lists(args):
+    valid = [(i,lst) for i,lst in enumerate(args) if isinstance(lst.multi_hand_landmarks,list)]
     
     if valid:
         return valid[0]
     else:
-        return None
+        return None,None
 
 def dump_object(obj,filename):
     if os.path.exists(filename):
@@ -241,21 +241,26 @@ class image_preprocessing:
             raise ValueError('Tipo de contraste no aceptado.')
         
         enhanced_image = cv2.filter2D(self.image, -1, kernel)
-        return enhanced_image
+        return enhanced_image, self.image
         
     @__to_self
     def histogram_equalization(self,contrast: str = 'global'):
+        lab = cv2.cvtColor(self.image, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        
         if contrast=='global': # Solo Histogram Equalization
-            return cv2.equalizeHist(self.image)
+            return cv2.equalizeHist(self.image), self.color
         elif contrast=='adaptive': # Adaptive Histogram Equalization
             eq = cv2.createCLAHE(clipLimit=40.0,tileGridSize=(8,8))
         elif contrast=='limited-adaptive': # Contrast Limited Adaptive Histogram Equalization
             eq = cv2.createCLAHE(clipLimit=2.0,tileGridSize=(8,8))
         else:
             raise ValueError('Tipo de contraste no aceptado')
-    
-        equalized_image = eq.apply(self.image)
-        return equalized_image
+
+        l = eq.apply(l)  
+        lab = cv2.merge((l,a,b)) 
+        equalized_image = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB) 
+        return equalized_image, self.color
     
     def __find_hand_rectangle(self):
         # Detectar los bordes
@@ -325,14 +330,11 @@ class mediapipe_landmarks(image_preprocessing):
         
         # En principio espero que no se usen todas. Si solo con las enhanced ya funciona bien, corto hasta ahí.
         # Para eso está el index.
-        results, index = select_lists(hands.process(self.image),                    # RGB
+        index, results = select_lists([hands.process(self.image),                   # RGB
                                       hands.process(self.original_image),           # BGR
-                                      hands.process(image_soft_enhanced.image),     # RGB Soft Edge Enhancement
-                                      hands.process(image_hard_enhanced.image),     # RGB Hard Edge Enhancement
-                                      hands.process(rgb_equalized.image),           # RGB adaptive equalized contrast
-                                      hands.process(equal_soft_enhanced.image),     # * Soft Edge Enhancement
-                                      hands.process(equal_hard_enhanced.image)      # * Hard Edge Enhancement
-                                      )
+                                      hands.process(image_soft_enhanced.image)     # RGB Soft Edge Enhancement
+                                      
+                                      ])
         self.coords: np.array = np.empty((0, 2))
         self.index = index
 
@@ -625,4 +627,3 @@ if __name__ == '__main__':
     dataset_exists()
     create_files('graph')
     create_files('gradient')
-    create_files('neural')
