@@ -1,7 +1,8 @@
-from sklearn.model_selection import RandomizedSearchCV
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
+from scipy.stats import randint, uniform
 import pandas as pd
 import numpy as np
 import os
@@ -100,6 +101,61 @@ def show_CM(CM: pd.DataFrame,way='pandas-style'):
         plt.show()
     else:
         raise AttributeError("'way' debe ser o 'pandas-style' (predeterminado) o 'seaborn'." )
+
+def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
+    """
+    Optimiza un modelo dado utilizando múltiples iteraciones de RandomizedSearchCV, seguido de un GridSearchCV.
+    
+    Parámetros:
+        model: El modelo de machine learning que será optimizado.
+        param_distributions: listas de valores para hiperparámetros.
+        X_T: Características de datos de entrenamiento.
+        Y_T: Categorías de datos de entrenamieno.
+        n_iter: Número de iteraciones a RandomizedSearchCV para agregar resultados.
+        
+    Resultados:
+        El mejor estimador de GridSearchCV.    
+    """
+    best_params_list = []
+    
+    for i in range(n_iter):
+        # Randomized Search CV
+        random_search = RandomizedSearchCV(estimator=model, 
+                                           param_distributions=param_distributions,
+                                           n_iter=100,
+                                           cv=5, 
+                                           random_state=i,
+                                           n_jobs=-1)
+        random_search.fit(X_T, Y_T)
+        best_params_list.append(random_search.best_params_)
+    
+    # Agrega los mejores parámetros para crear una grilla para GridSearchCV
+    param_grid = {}
+    
+    for param in param_distributions:
+        values = [best_params[param] for best_params in best_params_list]
+        unique_values = list(set(values))  # Quita duplicados
+        
+        if all(isinstance(value, (int, float)) for value in unique_values):
+            min_value = min(unique_values)
+            max_value = max(unique_values)
+            if isinstance(min_value, int):
+                param_grid[param] = list(range(min_value, max_value + 1))
+            else:
+                param_grid[param] = np.linspace(min_value, max_value, num=10).tolist()
+        else:
+            param_grid[param] = unique_values
+    
+    # Grid Search CV
+    grid_search = GridSearchCV(estimator=model, 
+                               param_grid=param_grid,
+                               cv=5, 
+                               n_jobs=-1)
+    grid_search.fit(X_T, Y_T)
+    
+    print(f"Mejores parámetros: {grid_search.best_params_}")
+    
+    return grid_search.best_estimator_
 
 # --------------
 # Transformación de imágenes
@@ -376,7 +432,7 @@ class hog_transform(image_preprocessing):
         self.image_path = image_path
 
         # Preprocesamiento
-        self.resize_image(64,to_self=True)
+        self.resize_image(128,to_self=True)
         self.to_grayscale(to_self=True)
         
         # Extracción de características con HOG
@@ -503,7 +559,7 @@ class model_trainer:
             self.param_distributions = {
                 'n_neighbors': np.arange(1, 31),
                 'weights': ['uniform', 'distance'],
-                'metric': ['euclidean', 'manhattan', 'minkowski']
+                'metric': ['euclidean', 'manhattan', 'minkowski','chebyshev']
             }
         elif self.clave_modelo == 'rf':
             self.modelo = RandomForestClassifier(random_state=42)
@@ -522,22 +578,10 @@ class model_trainer:
             # Configurar el modelo
             self.__setup_model()
             
-            X_train = self.train_set[0]
-            Y_train = self.label.fit_transform(self.train_set[1])
+            X_T = self.train_set[0]
+            Y_T = self.label.fit_transform(self.train_set[1])
             
-            # Configurar RandomizedSearchCV
-            random_search = RandomizedSearchCV(
-                estimator=self.modelo,
-                param_distributions=self.param_distributions,
-                n_iter = 100, # Por ajustar
-                cv = 5, # Por ajustar
-                verbose = 2,
-                random_state=42,
-                n_jobs=-1
-            )
-            
-            random_search.fit(X_train,Y_train)
-            self.modelo = random_search.best_estimator_
+            self.modelo = optimize_model(self.modelo, self.param_distributions, X_T, Y_T, n_iter=5)
             self.__is_trained = True
         else:
             print('Ya está entrenado el modelo.')
