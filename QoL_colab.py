@@ -8,6 +8,9 @@ import os
 import torch
 import cv2
 import pickle
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ["GLOG_minloglevel"] ="2"
@@ -425,7 +428,7 @@ class mediapipe_landmarks(image_preprocessing):
         return self.coords.flatten().tolist()
            
 class hog_transform(image_preprocessing):
-    def __init__(self, image_path, color: str = 'bgr',ppc=(6,6),cpb=(3,3)):
+    def __init__(self, image_path, color: str = 'bgr',ppc=(8,8),cpb=(3,3)):
         from skimage.feature import hog
         super().__init__(image_path,color)
         self.image_path = image_path
@@ -450,17 +453,15 @@ class hog_transform(image_preprocessing):
         self.hog_features = exposure.rescale_intensity(self.hog_features, in_range=(0,10))
         self.__is_normalized: bool = True
         
-    def to_csv(self, normalize: bool = True):
+    def to_csv(self, normalize: bool = True, name: str = 'path'):
         if normalize==True and self.__is_normalized==False:
-            self.normalize_hog()
-        else: pass
-        
-        feats = [self.image_path.split('\\')[-2]] + self.hog_features.flatten().tolist()
+          self.normalize_hog()
+        else:
+          pass
+        feats = [self.image_path.split('/')[-2]] + self.hog_features.flatten().tolist()
         columns = ['letra'] + [f'cell_{i}' for i in range(len(feats)-1)]
         df = pd.DataFrame([feats],columns=columns)
-        ruta = venv + r'\gradient-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
-        
-        df.to_csv(ruta, index=True, mode='a', header=not os.path.exists(ruta))
+        df.to_csv(name, index=True, mode='a', header=not os.path.exists(name))
         
     def extract_values (self,normalize: bool = True):
         if normalize==True and self.__is_normalized==False:
@@ -470,7 +471,88 @@ class hog_transform(image_preprocessing):
         self.image = self.hog_image
         return self.hog_features.flatten().tolist()
 
-# Acá iría la clase de CNN
+class cnn_transform(image_preprocessing):
+    def __init__(self, image_path, config, color='bgr'):
+        super().__init__(image_path,color)
+        self.image_path = image_path
+        self.config = config
+        self.model = self.build_model()
+
+        # Preprocesamiento
+        self.resize_image(128, to_self=True)
+        self.to_grayscale(to_self=True)
+        
+        # Extracción de características con CNN
+        self.features = self.extract_features()
+        
+    def build_model(self):
+        class CustomCNN(nn.Module):
+            def __init__(self, config):
+                super(CustomCNN, self).__init__()
+                layers = []
+                in_channels = 1  # Grayscale image
+
+                for i in range(config['NCB']):
+                    out_channels = config['Ncf']
+                    kernel_size = config['Sck']
+                    if config['Tacti'] == 'ReLU':
+                        activation = nn.ReLU()
+                    elif config['Tacti'] == 'eLU':
+                        activation = nn.ELU()
+                    elif config['Tacti'] == 'PReLU':
+                        activation = nn.PReLU()
+                    
+                    layers.append(nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=1, padding=kernel_size//2))
+                    layers.append(activation)
+                    
+                    if config['Tpool'] == 'max':
+                        layers.append(nn.MaxPool2d(kernel_size=config['Spk'], stride=2))
+                    elif config['Tpool'] == 'average':
+                        layers.append(nn.AvgPool2d(kernel_size=config['Spk'], stride=2))
+                    elif config['Tpool'] == 'convolutional':
+                        layers.append(nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=config['Spk'], stride=2))
+                    
+                    in_channels = out_channels
+
+                self.conv_layers = nn.Sequential(*layers)
+                self.flatten = nn.Flatten()
+                self.dropout = nn.Dropout(0.5)
+
+            def forward(self, x):
+                x = self.conv_layers(x)
+                x = self.flatten(x)
+                x = self.dropout(x)
+                return x
+
+        model = CustomCNN(self.config)
+        return model
+
+    def extract_features(self):
+        image_tensor = torch.tensor(self.image, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        with torch.no_grad():
+            features = self.model(image_tensor)
+        return features.numpy().flatten()
+
+    def normalize_cnn(self):
+        features_norm = (self.features - np.mean(self.features)) / np.std(self.features)
+        return features_norm
+
+    def to_csv(self, normalize:bool=True,name:str='path'):
+        if normalize:
+            feats = [self.image_path.split('/')[-2]] + self.normalize_cnn().tolist()
+        else:
+            feats = [self.image_path.split('/')[-2]] + self.features.tolist()
+        columns = ['letra'] + [f'feature_{i}' for i in range(len(feats)-1)]
+        df = pd.DataFrame([feats], columns=columns)
+        
+        df.to_csv(name, index=True, mode='a', header=not os.path.exists(name))
+
+    def extract_values(self, normalize=True):
+        if normalize:
+            return self.normalize_cnn().tolist()
+        else:
+            return self.features.tolist()
+
 
 class model_trainer:
     def __init__(self, tecnica: str, modelo: str):
