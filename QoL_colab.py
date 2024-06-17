@@ -16,7 +16,6 @@ from scikeras.wrappers import KerasClassifier
 from keras._tf_keras.keras.models import Sequential
 from keras._tf_keras.keras.layers import Dense
 from keras._tf_keras.keras.optimizers import Adam, SGD, RMSprop,Adagrad
-from functools import partial
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ["GLOG_minloglevel"] ="2"
@@ -40,7 +39,7 @@ def create_files(type: str):
         if os.path.exists(path_py):
             pass
         else:
-            with open('samples\multiproc.txt','r') as file:
+            with open(r'samples\multiproc.txt','r') as file:
                 commands = eval(file.read())
             with open(path_py, 'w') as file:
                 file.write(commands)
@@ -49,7 +48,7 @@ def create_files(type: str):
             pass
         else: 
             # Creación de archivo training
-            with open('samples\modeller.txt','r') as file:
+            with open(r'samples\modeller.txt','r') as file:
                 commands = file.read()
             with open(path_ipynb,'w') as file:
                 file.write(commands)
@@ -94,8 +93,11 @@ def dump_object(obj,filename):
         pickle.dump(data,file)
 
 def show_CM(CM: pd.DataFrame,way='pandas-style'):
+    CM.sort_index(axis=1, inplace=True)
+    CM.sort_index(axis=0, inplace=True)
+    
     if way=='pandas-style':
-        stylish = CM.style.background_gradient(cmap='coolwarm').set_precision(2)
+        stylish = CM.style.background_gradient(cmap='coolwarm')
         return stylish
     elif way=='seaborn':
         import matplotlib.pyplot as plt
@@ -157,7 +159,7 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
     # Grid Search CV
     grid_search = GridSearchCV(estimator=model, 
                                param_grid=param_grid,
-                               cv=5, 
+                               cv=3, 
                                n_jobs=-1)
     grid_search.fit(X_T, Y_T)
     
@@ -165,25 +167,32 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
     
     return grid_search.best_estimator_
 
-def ANN(hn1, hn2, hn3, hn4, activation, optimizer, loss, metrics, input_shape, output_shape):
+def ANN(neurons, activation, input_shape, output_shape):
     model = Sequential()
-    model.add(Dense(hn1, activation=activation, input_shape=input_shape))
-    model.add(Dense(hn2, activation=activation))
-    model.add(Dense(hn3, activation=activation))
-    model.add(Dense(hn4, activation=activation))
+    model.add(Dense(neurons[0], activation=activation, input_shape=(input_shape,)))
+    model.add(Dense(neurons[1], activation=activation))
+    model.add(Dense(neurons[2], activation=activation))
+    model.add(Dense(neurons[3], activation=activation))
     model.add(Dense(output_shape, activation='softmax'))
 
-    if optimizer == 'adam':
-        opt = Adam()
-    elif optimizer == 'sgd':
-        opt = SGD()
-    elif optimizer == 'rmsprop':
-        opt = RMSprop()
-    elif optimizer == 'adagrad':
-        opt = Adagrad()
-
-    model.compile(optimizer=opt, loss=loss, metrics=metrics)
     return model
+
+def extractor(extract_class, configs, path, lock):
+    # No se considera 'convolutional' porque ya tiene métodos de multiprocessing internos.
+    try:
+        ins = extract_class(path,**configs)
+        with lock:
+            ins.to_csv()
+    except:
+        pass
+            
+def multiextractor(extract_class,configs,paths):
+    with Manager() as manager:
+        lock = manager.Lock()
+        with Pool(processes=8) as pool:
+            pool.starmap(extractor, [(extract_class,configs,path,lock) for path in paths])
+            pool.close()
+            pool.join()
 
 # --------------
 # Transformación de imágenes
@@ -387,11 +396,11 @@ class mediapipe_landmarks(image_preprocessing):
         import mediapipe as mp
         super().__init__(image_path,color)
         self.image_path = image_path
-        self.letter = self.image_path.split('\\')[-2]
+        self.letter = self.image_path.split('/')[-2]
         
         # Iniciar el framework de reconocimiento de coordenadas
         mp_hands = mp.solutions.hands
-        hands = mp_hands.Hands(static_image_mode=True, max_num_hands=1, min_detection_confidence=0.5)
+        hands = mp_hands.Hands(static_image_mode=True, max_num_hands=1, min_detection_confidence=0.2)
         mp_drawing = mp.solutions.drawing_utils
 
         # Leer y procesar la imagen
@@ -430,21 +439,22 @@ class mediapipe_landmarks(image_preprocessing):
         self.__is_normalized: bool = True
         self.coords = scaler.fit_transform(self.coords)
         
-    def to_csv(self,normalize: bool = True):
-        if normalize==True and self.__is_normalized==False:
-            self.normalize_coords()
-        else: pass
+    def to_csv(self,name='path'):
+        self.normalize_coords()
         
-        coords = [self.image_path.split('\\')[-2]] + self.coords.flatten().tolist()
-        
+        coords = [self.image_path.split('/')[-2]] + self.coords.flatten().tolist()
         columns = ['letra']
         for i in range(21):
             columns.extend([f"x_{i}", f"y_{i}"])
 
-        ruta = venv + r'\graph-processing\processed_data\{}.csv'.format(self.image_path.split("\\")[-3])
         df = pd.DataFrame([coords],columns=columns)
         
-        df.to_csv(ruta, index=True, mode='a', header=not os.path.exists(ruta))
+        if name =='path':
+            ruta = r'{}.csv'.format(self.image_path.split("/")[-3])
+        else:
+            ruta = name
+        
+        df.to_csv(ruta, index=False, mode='a', header=not os.path.exists(ruta))
         
     def extract_values (self,normalize: bool = True):
         if normalize==True and self.__is_normalized==False:
@@ -479,10 +489,8 @@ class hog_transform(image_preprocessing):
         self.hog_features = exposure.rescale_intensity(self.hog_features, in_range=(0,10))
         self.__is_normalized: bool = True
         
-    def to_csv(self, normalize: bool = True, name: str = 'path'):
-        if normalize==True and self.__is_normalized==False:
-          self.normalize_hog()
-        else: pass
+    def to_csv(self, name: str = 'path'):
+        self.normalize_hog()
         
         feats = [self.image_path.split('/')[-2]] + self.hog_features.flatten().tolist()
         columns = ['letra'] + [f'cell_{i}' for i in range(len(feats)-1)]
@@ -572,11 +580,13 @@ class cnn_extractor:
 
     def __get_dataset(self,paths):
         with Pool(processes=8) as pool:
-            self.featurizers = pool.map(cnn_extractor.create_featurizer, paths) 
+            featurizers = pool.map(cnn_extractor.create_featurizer, paths) 
         
-        self.le = LabelEncoder()        
-        self.__tensors = torch.stack([featurizer.image_tensor for featurizer in self.featurizers])
-        self.__labels = torch.tensor(self.le.fit_transform([featurizer.letter for featurizer in self.featurizers]), dtype=torch.long)
+        self.le = LabelEncoder()
+        valid_featurizers = [featurizer for featurizer in featurizers if featurizer is not None]
+
+        self.__tensors = torch.stack([featurizer.image_tensor for featurizer in valid_featurizers])
+        self.__labels = torch.tensor(self.le.fit_transform([featurizer.letter for featurizer in valid_featurizers]), dtype=torch.long)
 
         self.dataset = TensorDataset(self.__tensors,self.__labels)
 
@@ -774,16 +784,18 @@ class model_trainer:
                 'min_samples_leaf': np.linspace(1, 30, num=10, dtype=int).tolist()
             }
         elif self.clave_modelo == 'ann':
-            self.modelo = KerasClassifier(build_fn=ANN,input_shape=self.train_set[0].shape[1],output_shape=26,verbose=0)
+            self.modelo = KerasClassifier(model=ANN,
+                                          model__input_shape=self.train_set[0].shape[1],
+                                          model__output_shape=26,
+                                          metrics=['accuracy'],
+                                          loss='sparse_categorical_crossentropy',
+                                          random_state=42,
+                                          verbose=0)
             self.param_distributions = {
-                'hn1': [2056,1024,512],
-                'hn2': [1024,512,256],
-                'hn3': [512,256,128],
-                'hn4': [256,128,64],
-                'activation': ['relu', 'sigmoid', 'tanh', 'elu'],
-                'optimizer': ['adam', 'sgd', 'rmsprop', 'adagrad'],
-                'loss': ['sparse_categorical_crossentropy'],
-                'metrics': [['accuracy']],
+                'model__neurons': [(2056,1024,512,256),(1024,512,256,128),(512,256,128,64)],
+                'model__activation': ['relu', 'sigmoid', 'tanh', 'elu'],
+                'optimizer': [Adam, SGD, RMSprop, Adagrad],
+                'optimizer__learning_rate': [0.0001,0.001,0.01,0.1],
                 'epochs': np.linspace(2, 50, num=5, dtype=int).tolist(),
                 'batch_size': [1, 32, 64]
             }
