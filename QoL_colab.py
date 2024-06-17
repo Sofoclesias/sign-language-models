@@ -5,12 +5,17 @@ from sklearn.preprocessing import LabelEncoder
 import pandas as pd
 import numpy as np
 import os
-import torch
 import cv2
 import pickle
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.multiprocessing import Pool, Manager
+from scikeras.wrappers import KerasClassifier
+from keras._tf_keras.keras.models import Sequential
+from keras._tf_keras.keras.layers import Dense
+from keras._tf_keras.keras.optimizers import Adam, SGD, RMSprop,Adagrad
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ["GLOG_minloglevel"] ="2"
@@ -124,7 +129,7 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
         # Randomized Search CV
         random_search = RandomizedSearchCV(estimator=model, 
                                            param_distributions=param_distributions,
-                                           n_iter=100,
+                                           n_iter=30,
                                            cv=5, 
                                            random_state=i,
                                            n_jobs=-1)
@@ -158,6 +163,25 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
     print(f"Mejores parámetros: {grid_search.best_params_}")
     
     return grid_search.best_estimator_
+
+def ANN(neurons, activation, layers, learning_rate, optimizer, loss, metrics, input_shape, output_shape):
+    model = Sequential()
+    model.add(Dense(neurons[0], activation=activation, input_shape=input_shape))
+    for i in range(1, layers):
+        model.add(Dense(neurons[i], activation=activation))
+    model.add(Dense(output_shape, activation='softmax'))
+
+    if optimizer == 'adam':
+        opt = Adam(learning_rate=learning_rate)
+    elif optimizer == 'sgd':
+        opt = SGD(learning_rate=learning_rate)
+    elif optimizer == 'rmsprop':
+        opt = RMSprop(learning_rate=learning_rate)
+    elif optimizer == 'adagrad':
+        opt = Adagrad(learning_rate=learning_rate)
+
+    model.compile(optimizer=opt, loss=loss, metrics=metrics)
+    return model
 
 # --------------
 # Transformación de imágenes
@@ -456,12 +480,18 @@ class hog_transform(image_preprocessing):
     def to_csv(self, normalize: bool = True, name: str = 'path'):
         if normalize==True and self.__is_normalized==False:
           self.normalize_hog()
-        else:
-          pass
+        else: pass
+        
         feats = [self.image_path.split('/')[-2]] + self.hog_features.flatten().tolist()
         columns = ['letra'] + [f'cell_{i}' for i in range(len(feats)-1)]
         df = pd.DataFrame([feats],columns=columns)
-        df.to_csv(name, index=True, mode='a', header=not os.path.exists(name))
+        
+        if name =='path':
+            ruta = r'{}.csv'.format(self.image_path.split("/")[-3])
+        else:
+            ruta = name
+        
+        df.to_csv(ruta, index=True, mode='a', header=not os.path.exists(ruta))
         
     def extract_values (self,normalize: bool = True):
         if normalize==True and self.__is_normalized==False:
@@ -471,34 +501,38 @@ class hog_transform(image_preprocessing):
         self.image = self.hog_image
         return self.hog_features.flatten().tolist()
 
-class cnn_transform(image_preprocessing):
-    def __init__(self, image_path, config, color='bgr'):
-        super().__init__(image_path,color)
-        self.image_path = image_path
-        self.config = config
-        self.model = self.build_model()
+class cnn_featurize(image_preprocessing):
+            def __init__(self, image_path, color: str = 'bgr'):
+                super().__init__(image_path,color)
+                self.image_path = image_path
+                self.letter = self.image_path.split('/')[-2]
 
-        # Preprocesamiento
-        self.resize_image(128, to_self=True)
-        self.to_grayscale(to_self=True)
+                # Preprocesamiento
+                self.resize_image(128,to_self=True)
+                self.to_grayscale(to_self=True)
+                self.image = self.image.astype('float32') / 255.0
+                self.image_tensor = torch.tensor(self.image).unsqueeze(0)
+
+class cnn_extractor:
+    def __init__(self, train_paths, config, epochs=10):
+        self.config = config
+        self.model = self.__build_model()
+        self.__get_dataset(train_paths)
+        self.__train_model(epochs=epochs)
         
-        # Extracción de características con CNN
-        self.features = self.extract_features()
-        
-    def build_model(self):
+    def __build_model(self):
         class CustomCNN(nn.Module):
             def __init__(self, config):
                 super(CustomCNN, self).__init__()
                 layers = []
                 in_channels = 1  # Grayscale image
 
-                for i in range(config['NCB']):
+                for _ in range(config['NCB']):
                     out_channels = config['Ncf']
                     kernel_size = config['Sck']
+                    
                     if config['Tacti'] == 'ReLU':
                         activation = nn.ReLU()
-                    elif config['Tacti'] == 'eLU':
-                        activation = nn.ELU()
                     elif config['Tacti'] == 'PReLU':
                         activation = nn.PReLU()
                     
@@ -509,63 +543,149 @@ class cnn_transform(image_preprocessing):
                         layers.append(nn.MaxPool2d(kernel_size=config['Spk'], stride=2))
                     elif config['Tpool'] == 'average':
                         layers.append(nn.AvgPool2d(kernel_size=config['Spk'], stride=2))
-                    elif config['Tpool'] == 'convolutional':
-                        layers.append(nn.Conv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=config['Spk'], stride=2))
                     
                     in_channels = out_channels
 
                 self.conv_layers = nn.Sequential(*layers)
                 self.flatten = nn.Flatten()
+                self.fc = nn.Linear(out_channels * (config['input_size'] // (2 ** config['NCB'])) ** 2, config['cant_neurons'])  # Capa totalmente conectada con 256 neuronas
                 self.dropout = nn.Dropout(0.5)
 
             def forward(self, x):
                 x = self.conv_layers(x)
                 x = self.flatten(x)
+                x = self.fc(x)
                 x = self.dropout(x)
                 return x
 
         model = CustomCNN(self.config)
         return model
 
-    def extract_features(self):
-        image_tensor = torch.tensor(self.image, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    @staticmethod
+    def create_featurizer(path):
+        return cnn_featurize(path)
+
+    def __get_dataset(self,paths):
+        with Pool(processes=8) as pool:
+            self.featurizers = pool.map(cnn_extractor.create_featurizer, paths) 
+        
+        self.le = LabelEncoder()        
+        self.__tensors = torch.stack([featurizer.image_tensor for featurizer in self.featurizers])
+        self.__labels = torch.tensor(self.le.fit_transform([featurizer.letter for featurizer in self.featurizers]), dtype=torch.long)
+
+        self.dataset = TensorDataset(self.__tensors,self.__labels)
+
+    def __train_model(self,epochs=20):
+        # Optimizadores
+        optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        criterion = nn.CrossEntropyLoss()
+        
+        # Datos de entrenamiento y validación
+        train_size = int(0.7 * len(self.dataset))
+        val_size = len(self.dataset) - train_size
+        
+        T_ds, v_ds = random_split(self.dataset,[train_size,val_size],generator=torch.Generator().manual_seed(42))
+        T_loader, v_loader = DataLoader(T_ds,batch_size=1,shuffle=True), DataLoader(v_ds,batch_size=1,shuffle=False)
+        
+        # Inicio entrenamiento
+        self.model.train()
+        for epoch in range(epochs):
+            running_loss = 0.0
+            for inputs, labels in T_loader:
+                optimizer.zero_grad()
+                outputs = self.model(inputs)
+                loss = criterion(outputs,labels)
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item()
+            print(f"Epoch {epoch+1}, Loss: {running_loss / len(T_loader)}")
+            
+            # Inicio validación
+            self.model.eval()
+            val_loss = 0.0
+            correct, total = 0, 0
+            
+            with torch.no_grad():
+                for inputs, labels in v_loader:
+                    outputs = self.model(inputs)
+                    loss = criterion(outputs,labels)
+                    val_loss += loss.item()
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
+            print(f"Validation Loss: {val_loss / len(v_loader)}, Accuracy: {100 * correct / total}%")
+            self.model.train()   
+     
+    def extract_features(self, image_path):
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (128, 128))
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        image = image.astype('float32') / 255.0
+        image_tensor = torch.tensor(image).unsqueeze(0).unsqueeze(0)
+        
+        # Extraer características
+        self.model.eval()
         with torch.no_grad():
             features = self.model(image_tensor)
         return features.numpy().flatten()
 
-    def normalize_cnn(self):
-        features_norm = (self.features - np.mean(self.features)) / np.std(self.features)
-        return features_norm
-
-    def to_csv(self, normalize:bool=True,name:str='path'):
-        if normalize:
-            feats = [self.image_path.split('/')[-2]] + self.normalize_cnn().tolist()
+    @staticmethod
+    def normalize_cnn(features):
+            features_norm = (features - np.mean(features)) / np.std(features)
+            return features_norm
+    
+    @staticmethod
+    def multiexport(path,name,lock,features):
+            feats = [path.split('/')[-2]] + features.tolist()
+            columns = ['letra'] + [f'feature_{i}' for i in range(len(feats) - 1)]
+            df = pd.DataFrame([feats],columns=columns)
+            
+            if name =='path':
+                ruta = r'{}.csv'.format(path.split("/")[-3])
+            else:
+                ruta = name
+            
+            if lock is None:
+                df.to_csv(ruta, index=False, mode='a', header=not os.path.exists(ruta))
+            else:
+                with lock:
+                    df.to_csv(ruta, index=False, mode='a', header=not os.path.exists(ruta))
+    
+    def transform_to_csv(self,image_paths,name:str='path',n_jobs=-1):
+        print('Exporting.')
+        if n_jobs==-1:
+            with Manager() as manager:
+                lock = manager.Lock()
+                with Pool(processes=8) as pool:
+                    pool.starmap(cnn_extractor.multiexport, [(path,name,lock,cnn_extractor.normalize_cnn(self.extract_features(path))) for path in image_paths])
+                    pool.close()
+                    pool.join()
         else:
-            feats = [self.image_path.split('/')[-2]] + self.features.tolist()
-        columns = ['letra'] + [f'feature_{i}' for i in range(len(feats)-1)]
-        df = pd.DataFrame([feats], columns=columns)
-        
-        df.to_csv(name, index=True, mode='a', header=not os.path.exists(name))
-
-    def extract_values(self, normalize=True):
-        if normalize:
-            return self.normalize_cnn().tolist()
-        else:
-            return self.features.tolist()
-
+            for path in image_paths:
+                cnn_extractor.multiexport(path,name, None, self.extract_features)
 
 class model_trainer:
-    def __init__(self, tecnica: str, modelo: str):
-        # keywords = {'técnica': (graph,gradient) , 'modelo':(knn,rf)}
+    def __init__(self, tecnica: str, modelo: str, paths=None, cnn_extractor=None):
+        # keywords = {'técnica': (graph,gradient,convolutional) , 'modelo':(knn,rf,ann)}
         # Claves
-        if tecnica in ['graph','gradient','neural'] and modelo in ['knn','rf','ann']:
+        if tecnica in ['graph','gradient','convolutional'] and modelo in ['knn','rf','ann']:
             self.representacion = tecnica
             self.clave_modelo = modelo
+            
+            if cnn_extractor is not None and tecnica=='convolutional':
+                self.convolutor = cnn_extractor
+            else:
+                pass
         else: 
             raise ValueError('Técnica de representación o modelo no identificado.')
         
-        self.dataset_path = {'train':os.path.join(venv, f'{self.representacion}-processing\processed_data\Train_Alphabet.csv'),
-                             'test':os.path.join(venv, f'{self.representacion}-processing\processed_data\Test_Alphabet.csv')}
+        if paths: #
+            self.dataset_path = {'train': paths[0],
+                                 'test':paths[1]}
+        else:    
+            self.dataset_path = {'train':os.path.join(venv, f'{self.representacion}-processing\processed_data\Train_Alphabet.csv'),
+                                'test':os.path.join(venv, f'{self.representacion}-processing\processed_data\Test_Alphabet.csv')}
 
         # Conjuntos de entrenamiento y prueba
         train_set = pd.read_csv(self.dataset_path['train'],sep=',', encoding='utf-8',on_bad_lines='skip',usecols=lambda column: column not in ['Unnamed: 0','origen' ,'    '])
@@ -645,15 +765,26 @@ class model_trainer:
         elif self.clave_modelo == 'rf':
             self.modelo = RandomForestClassifier(random_state=42)
             self.param_distributions = {
-                'n_estimators': np.arange(10, 200),
+                'n_estimators': np.linspace(10, 1000, num=10, dtype=int).tolist(),
                 'max_features': ['auto', 'sqrt', 'log2'],
-                'max_depth': [None] + list(np.arange(5, 50, 5)),
-                'min_samples_split': np.arange(2, 11),
-                'min_samples_leaf': np.arange(1, 11)
+                'max_depth': np.linspace(10, 100, num=10, dtype=int).tolist() + [None],
+                'min_samples_split': np.linspace(2, 40, num=10, dtype=int).tolist(),
+                'min_samples_leaf': np.linspace(1, 30, num=10, dtype=int).tolist()
             }
         elif self.clave_modelo == 'ann':
-            pass
-    
+            self.modelo = KerasClassifier(build_fn=ANN,input_shape=self.train_set[0].shape[1],output_shape=26,verbose=0)
+            self.param_distributions = {
+                'neurons': [[2056, 1024, 512, 256], [1024, 512, 256, 128], [512, 256,128,64]],
+                'activation': ['relu', 'sigmoid', 'tanh', 'elu'],
+                'layers': [4],
+                'learning_rate': [0.001, 0.01, 0.1],
+                'optimizer': ['adam', 'sgd', 'rmsprop', 'adagrad'],
+                'loss': ['categorical_crossentropy', 'sparse_categorical_crossentropy'],
+                'metrics': [['accuracy']],
+                'epochs': np.linspace(2, 50, num=5, dtype=int).tolist(),
+                'batch_size': [1, 32, 64]
+            }
+            
     def train_model(self):
         if not self.__is_trained:
             # Configurar el modelo
@@ -720,9 +851,3 @@ class model_trainer:
             # Como está en Label, la predicción arrojaría un número.
             # Con este nuevo método de reemplazo, te arroja la letra directamente.
             return self.label.inverse_transform(self.modelo.predict(X_test))
-        
-# Este archivo .py solo debería ser iniciado la primera vez que se haga el processing.
-if __name__ == '__main__':
-    dataset_exists()
-    create_files('graph')
-    create_files('gradient')
