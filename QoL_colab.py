@@ -16,6 +16,7 @@ from scikeras.wrappers import KerasClassifier
 from keras._tf_keras.keras.models import Sequential
 from keras._tf_keras.keras.layers import Dense
 from keras._tf_keras.keras.optimizers import Adam, SGD, RMSprop,Adagrad
+from functools import partial
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ["GLOG_minloglevel"] ="2"
@@ -164,21 +165,22 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
     
     return grid_search.best_estimator_
 
-def ANN(neurons, activation, layers, learning_rate, optimizer, loss, metrics, input_shape, output_shape):
+def ANN(hn1, hn2, hn3, hn4, activation, optimizer, loss, metrics, input_shape, output_shape):
     model = Sequential()
-    model.add(Dense(neurons[0], activation=activation, input_shape=input_shape))
-    for i in range(1, layers):
-        model.add(Dense(neurons[i], activation=activation))
+    model.add(Dense(hn1, activation=activation, input_shape=input_shape))
+    model.add(Dense(hn2, activation=activation))
+    model.add(Dense(hn3, activation=activation))
+    model.add(Dense(hn4, activation=activation))
     model.add(Dense(output_shape, activation='softmax'))
 
     if optimizer == 'adam':
-        opt = Adam(learning_rate=learning_rate)
+        opt = Adam()
     elif optimizer == 'sgd':
-        opt = SGD(learning_rate=learning_rate)
+        opt = SGD()
     elif optimizer == 'rmsprop':
-        opt = RMSprop(learning_rate=learning_rate)
+        opt = RMSprop()
     elif optimizer == 'adagrad':
-        opt = Adagrad(learning_rate=learning_rate)
+        opt = Adagrad()
 
     model.compile(optimizer=opt, loss=loss, metrics=metrics)
     return model
@@ -563,7 +565,10 @@ class cnn_extractor:
 
     @staticmethod
     def create_featurizer(path):
-        return cnn_featurize(path)
+        try:
+            return cnn_featurize(path)
+        except:
+            pass
 
     def __get_dataset(self,paths):
         with Pool(processes=8) as pool:
@@ -666,7 +671,7 @@ class cnn_extractor:
                 cnn_extractor.multiexport(path,name, None, self.extract_features)
 
 class model_trainer:
-    def __init__(self, tecnica: str, modelo: str, paths=None, cnn_extractor=None):
+    def __init__(self, tecnica: str, modelo: str, cnn_extractor=None):
         # keywords = {'técnica': (graph,gradient,convolutional) , 'modelo':(knn,rf,ann)}
         # Claves
         if tecnica in ['graph','gradient','convolutional'] and modelo in ['knn','rf','ann']:
@@ -680,12 +685,9 @@ class model_trainer:
         else: 
             raise ValueError('Técnica de representación o modelo no identificado.')
         
-        if paths: #
-            self.dataset_path = {'train': paths[0],
-                                 'test':paths[1]}
-        else:    
-            self.dataset_path = {'train':os.path.join(venv, f'{self.representacion}-processing\processed_data\Train_Alphabet.csv'),
-                                'test':os.path.join(venv, f'{self.representacion}-processing\processed_data\Test_Alphabet.csv')}
+
+        self.dataset_path = {'train': '/content/drive/MyDrive/ml-processing/' + f'{self.representacion}-processing/Train_Alphabet.csv',
+                             'test': '/content/drive/MyDrive/ml-processing/' + f'{self.representacion}-processing/Test_Alphabet.csv'}
 
         # Conjuntos de entrenamiento y prueba
         train_set = pd.read_csv(self.dataset_path['train'],sep=',', encoding='utf-8',on_bad_lines='skip',usecols=lambda column: column not in ['Unnamed: 0','origen' ,'    '])
@@ -774,12 +776,13 @@ class model_trainer:
         elif self.clave_modelo == 'ann':
             self.modelo = KerasClassifier(build_fn=ANN,input_shape=self.train_set[0].shape[1],output_shape=26,verbose=0)
             self.param_distributions = {
-                'neurons': [[2056, 1024, 512, 256], [1024, 512, 256, 128], [512, 256,128,64]],
+                'hn1': [2056,1024,512],
+                'hn2': [1024,512,256],
+                'hn3': [512,256,128],
+                'hn4': [256,128,64],
                 'activation': ['relu', 'sigmoid', 'tanh', 'elu'],
-                'layers': [4],
-                'learning_rate': [0.001, 0.01, 0.1],
                 'optimizer': ['adam', 'sgd', 'rmsprop', 'adagrad'],
-                'loss': ['categorical_crossentropy', 'sparse_categorical_crossentropy'],
+                'loss': ['sparse_categorical_crossentropy'],
                 'metrics': [['accuracy']],
                 'epochs': np.linspace(2, 50, num=5, dtype=int).tolist(),
                 'batch_size': [1, 32, 64]
@@ -840,7 +843,7 @@ class model_trainer:
             }
             
     def export_model(self):
-        path = os.path.join(venv,f'{self.representacion}-processing/models/{self.clave_modelo}-model.pkl')
+        path = '/content/drive/MyDrive/ml-processing/' + f'{self.representacion}-processing/models/{self.clave_modelo}-model.pkl'
         with open(path, 'wb') as file:
             pickle.dump(self,file)
             
