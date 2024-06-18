@@ -132,10 +132,11 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
         # Randomized Search CV
         random_search = RandomizedSearchCV(estimator=model, 
                                            param_distributions=param_distributions,
-                                           n_iter=30,
-                                           cv=5, 
+                                           n_iter=10,
+                                           cv=3, 
                                            random_state=i,
-                                           n_jobs=-1)
+                                           n_jobs=-1,
+                                           verbose=1)
         random_search.fit(X_T, Y_T)
         best_params_list.append(random_search.best_params_)
     
@@ -150,17 +151,18 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
             min_value = min(unique_values)
             max_value = max(unique_values)
             if isinstance(min_value, int):
-                param_grid[param] = list(range(min_value, max_value + 1))
+                param_grid[param] = np.linspace(min_value, max_value + 1,num=5,dtype=int)
             else:
-                param_grid[param] = np.linspace(min_value, max_value, num=10).tolist()
+                param_grid[param] = np.linspace(min_value, max_value, num=5).tolist()
         else:
             param_grid[param] = unique_values
     
     # Grid Search CV
     grid_search = GridSearchCV(estimator=model, 
                                param_grid=param_grid,
-                               cv=3, 
-                               n_jobs=-1)
+                               cv=5, 
+                               n_jobs=-1,
+                               verbose=1)
     grid_search.fit(X_T, Y_T)
     
     print(f"Mejores parámetros: {grid_search.best_params_}")
@@ -669,11 +671,19 @@ class cnn_extractor:
     
     def transform_to_csv(self,image_paths,name:str='path',n_jobs=-1):
         print('Exporting.')
+        
+        tensors = []
+        for path in image_paths:
+            try:
+                tensors.append(cnn_extractor.normalize_cnn(self.extract_features(path)))
+            except:
+                pass
+        
         if n_jobs==-1:
             with Manager() as manager:
                 lock = manager.Lock()
                 with Pool(processes=8) as pool:
-                    pool.starmap(cnn_extractor.multiexport, [(path,name,lock,cnn_extractor.normalize_cnn(self.extract_features(path))) for path in image_paths])
+                    pool.starmap(cnn_extractor.multiexport, [(image_paths[i],name,lock,tensors[i]) for i in range(len(image_paths))])
                     pool.close()
                     pool.join()
         else:
