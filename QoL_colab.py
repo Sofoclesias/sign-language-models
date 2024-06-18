@@ -112,7 +112,7 @@ def show_CM(CM: pd.DataFrame,way='pandas-style'):
     else:
         raise AttributeError("'way' debe ser o 'pandas-style' (predeterminado) o 'seaborn'." )
 
-def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
+def optimize_model(model, param_distributions, X_T, Y_T, n_iter=3):
     """
     Optimiza un modelo dado utilizando múltiples iteraciones de RandomizedSearchCV, seguido de un GridSearchCV.
     
@@ -160,7 +160,7 @@ def optimize_model(model, param_distributions, X_T, Y_T, n_iter=5):
     # Grid Search CV
     grid_search = GridSearchCV(estimator=model, 
                                param_grid=param_grid,
-                               cv=5, 
+                               cv=2, 
                                n_jobs=-1,
                                verbose=1)
     grid_search.fit(X_T, Y_T)
@@ -513,6 +513,43 @@ class hog_transform(image_preprocessing):
         self.image = self.hog_image
         return self.hog_features.flatten().tolist()
 
+class CustomCNN(nn.Module):
+    def __init__(self, config):
+        super(CustomCNN, self).__init__()
+        layers = []
+        in_channels = 1  # Grayscale image
+
+        for _ in range(config['NCB']):
+            out_channels = config['Ncf']
+            kernel_size = config['Sck']
+            
+            if config['Tacti'] == 'ReLU':
+                activation = nn.ReLU()
+            elif config['Tacti'] == 'PReLU':
+                activation = nn.PReLU()
+            
+            layers.append(nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=1, padding=kernel_size//2))
+            layers.append(activation)
+            
+            if config['Tpool'] == 'max':
+                layers.append(nn.MaxPool2d(kernel_size=config['Spk'], stride=2))
+            elif config['Tpool'] == 'average':
+                layers.append(nn.AvgPool2d(kernel_size=config['Spk'], stride=2))
+            
+            in_channels = out_channels
+
+        self.conv_layers = nn.Sequential(*layers)
+        self.flatten = nn.Flatten()
+        self.fc = nn.Linear(out_channels * (config['input_size'] // (2 ** config['NCB'])) ** 2, config['cant_neurons'])  # Capa totalmente conectada con 256 neuronas
+        self.dropout = nn.Dropout(0.5)
+
+    def forward(self, x):
+        x = self.conv_layers(x)
+        x = self.flatten(x)
+        x = self.fc(x)
+        x = self.dropout(x)
+        return x
+
 class cnn_featurize(image_preprocessing):
             def __init__(self, image_path, color: str = 'bgr'):
                 super().__init__(image_path,color)
@@ -528,50 +565,9 @@ class cnn_featurize(image_preprocessing):
 class cnn_extractor:
     def __init__(self, train_paths, config, epochs=10):
         self.config = config
-        self.model = self.__build_model()
+        self.model = CustomCNN(self.config)
         self.__get_dataset(train_paths)
         self.__train_model(epochs=epochs)
-        
-    def __build_model(self):
-        class CustomCNN(nn.Module):
-            def __init__(self, config):
-                super(CustomCNN, self).__init__()
-                layers = []
-                in_channels = 1  # Grayscale image
-
-                for _ in range(config['NCB']):
-                    out_channels = config['Ncf']
-                    kernel_size = config['Sck']
-                    
-                    if config['Tacti'] == 'ReLU':
-                        activation = nn.ReLU()
-                    elif config['Tacti'] == 'PReLU':
-                        activation = nn.PReLU()
-                    
-                    layers.append(nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=1, padding=kernel_size//2))
-                    layers.append(activation)
-                    
-                    if config['Tpool'] == 'max':
-                        layers.append(nn.MaxPool2d(kernel_size=config['Spk'], stride=2))
-                    elif config['Tpool'] == 'average':
-                        layers.append(nn.AvgPool2d(kernel_size=config['Spk'], stride=2))
-                    
-                    in_channels = out_channels
-
-                self.conv_layers = nn.Sequential(*layers)
-                self.flatten = nn.Flatten()
-                self.fc = nn.Linear(out_channels * (config['input_size'] // (2 ** config['NCB'])) ** 2, config['cant_neurons'])  # Capa totalmente conectada con 256 neuronas
-                self.dropout = nn.Dropout(0.5)
-
-            def forward(self, x):
-                x = self.conv_layers(x)
-                x = self.flatten(x)
-                x = self.fc(x)
-                x = self.dropout(x)
-                return x
-
-        model = CustomCNN(self.config)
-        return model
 
     @staticmethod
     def create_featurizer(path):
@@ -632,8 +628,9 @@ class cnn_extractor:
                     correct += (predicted == labels).sum().item()
             print(f"Validation Loss: {val_loss / len(v_loader)}, Accuracy: {100 * correct / total}%")
             self.model.train()   
-     
-    def extract_features(self, image_path):
+    
+    @staticmethod
+    def extract_features(image_path,model):
         image = cv2.imread(image_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = cv2.resize(image, (128, 128))
@@ -642,9 +639,9 @@ class cnn_extractor:
         image_tensor = torch.tensor(image).unsqueeze(0).unsqueeze(0)
         
         # Extraer características
-        self.model.eval()
+        model.eval()
         with torch.no_grad():
-            features = self.model(image_tensor)
+            features = model(image_tensor)
         return features.numpy().flatten()
 
     @staticmethod
@@ -668,22 +665,38 @@ class cnn_extractor:
             else:
                 with lock:
                     df.to_csv(ruta, index=False, mode='a', header=not os.path.exists(ruta))
-    
+
+    @staticmethod    
+    def tensorize_image(image_paths, model):
+        tensors = []
+        valid_paths = []
+        for path in image_paths:
+            try:
+                tensors.append(cnn_extractor.normalize_cnn(cnn_extractor.extract_features(path, model)))
+                valid_paths.append(path)
+            except:
+                pass
+        return valid_paths, tensors
+
     def transform_to_csv(self,image_paths,name:str='path',n_jobs=-1):
         print('Exporting.')
         
-        tensors = []
-        for path in image_paths:
-            try:
-                tensors.append(cnn_extractor.normalize_cnn(self.extract_features(path)))
-            except:
-                pass
+        chunk_size = len(image_paths) // 16
+        image_path_chunks = [image_paths[i:i + chunk_size] for i in range(0, len(image_paths), chunk_size)]
+        
+        all_paths = []
+        all_tensors = []
+        
+        with Pool(processes=8) as pool:
+            for valid_paths, tensors in pool.starmap(cnn_extractor.tensorize_image, [(chunk, self.model) for chunk in image_path_chunks]):
+                all_paths.extend(valid_paths)
+                all_tensors.extend(tensors)
         
         if n_jobs==-1:
             with Manager() as manager:
                 lock = manager.Lock()
                 with Pool(processes=8) as pool:
-                    pool.starmap(cnn_extractor.multiexport, [(image_paths[i],name,lock,tensors[i]) for i in range(len(image_paths))])
+                    pool.starmap(cnn_extractor.multiexport, [(all_paths[i],name,lock,all_tensors[i]) for i in range(len(all_paths))])
                     pool.close()
                     pool.join()
         else:
@@ -787,11 +800,11 @@ class model_trainer:
         elif self.clave_modelo == 'rf':
             self.modelo = RandomForestClassifier(random_state=42)
             self.param_distributions = {
-                'n_estimators': np.linspace(10, 1000, num=10, dtype=int).tolist(),
+                'n_estimators': np.linspace(10, 1000, num=100, dtype=int).tolist(),
                 'max_features': ['auto', 'sqrt', 'log2'],
-                'max_depth': np.linspace(10, 100, num=10, dtype=int).tolist() + [None],
-                'min_samples_split': np.linspace(2, 40, num=10, dtype=int).tolist(),
-                'min_samples_leaf': np.linspace(1, 30, num=10, dtype=int).tolist()
+                'max_depth': np.linspace(10, 100, num=15, dtype=int).tolist() + [None],
+                'min_samples_split': np.linspace(2, 20, num=10, dtype=int).tolist(),
+                'min_samples_leaf': np.linspace(1, 20, num=10, dtype=int).tolist()
             }
         elif self.clave_modelo == 'ann':
             self.modelo = KerasClassifier(model=ANN,
@@ -807,10 +820,10 @@ class model_trainer:
                 'optimizer': [Adam, SGD, RMSprop, Adagrad],
                 'optimizer__learning_rate': [0.0001,0.001,0.01,0.1],
                 'epochs': np.linspace(2, 50, num=5, dtype=int).tolist(),
-                'batch_size': [1, 32, 64]
+                'batch_size': [32, 64]
             }
             
-    def train_model(self):
+    def train_model(self,how: str = 'optimal'):
         if not self.__is_trained:
             # Configurar el modelo
             self.__setup_model()
@@ -818,7 +831,22 @@ class model_trainer:
             X_T = self.train_set[0]
             Y_T = self.label.fit_transform(self.train_set[1])
             
-            self.modelo = optimize_model(self.modelo, self.param_distributions, X_T, Y_T, n_iter=5)
+            if how=='optimal': 
+                self.modelo = optimize_model(self.modelo, self.param_distributions, X_T, Y_T)
+            elif how=='random':
+                random_search = RandomizedSearchCV(estimator=self.modelo, 
+                                           param_distributions=self.param_distributions,
+                                           n_iter=50,
+                                           cv=5, 
+                                           random_state=42,
+                                           n_jobs=-1,
+                                           verbose=1)
+                random_search.fit(X_T, Y_T)
+                
+                self.modelo = random_search.best_estimator_
+            else:
+                raise AttributeError('Valor en "how" no reconocido.')
+            
             self.__is_trained = True
         else:
             print('Ya está entrenado el modelo.')
