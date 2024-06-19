@@ -992,11 +992,11 @@ class model_trainer:
         plt.figure()
         if view == 'perclass':
             for i in range(self.__support_AUC['y_bintest'].shape[1]):
-                plt.plot(self.__support_AUC['fpr'][i], self.__support_AUC['tpr'][i], label=f'Clase {i} (AUC = {self.AUC_scores['perclass'][i]:.2f})')
+                plt.plot(self.__support_AUC['fpr'][i], self.__support_AUC['tpr'][i], label=f'Clase {i} (AUC = {self.AUC_scores["perclass"][i]:.2f})')
         elif view == 'ovr':
-            plt.plot(self.__support_AUC['fpr'][0], self.__support_AUC['tpr'][0], label=f'OVR (AUC = {self.AUC_scores['ovr']:.2f})')
+            plt.plot(self.__support_AUC['fpr'][0], self.__support_AUC['tpr'][0], label=f'OVR (AUC = {self.AUC_scores["ovr"]:.2f})')
         elif view == 'ovo':
-            plt.plot(self.__support_AUC['fpr'][0], self.__support_AUC['tpr'][0], label=f'OVO (AUC = {self.AUC_scores['ovo']:.2f})')
+            plt.plot(self.__support_AUC['fpr'][0], self.__support_AUC['tpr'][0], label=f'OVO (AUC = {self.AUC_scores["ovo"]:.2f})')
 
         plt.plot([0, 1], [0, 1], 'k--')
         plt.xlim([0.0, 1.0])
