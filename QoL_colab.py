@@ -18,15 +18,15 @@ from scikeras.wrappers import KerasClassifier
 from keras._tf_keras.keras.models import Sequential
 from keras._tf_keras.keras.layers import Dense
 from keras._tf_keras.keras.optimizers import Adam, SGD, RMSprop,Adagrad
-from roboflow import Roboflow
-from rembg import remove
 from PIL import Image, ImageOps
 import random
+import string
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ["GLOG_minloglevel"] ="2"
 
 venv = os.path.dirname((os.path.abspath(__file__)))
+letras = list(string.ascii_uppercase)
 
 # --------------
 # Funciones generales
@@ -339,7 +339,9 @@ class image_preprocessing:
                     imagen_transformada.save(ruta_nueva_imagen)
     
     @staticmethod
-    def main_preprocess(path, *args):
+    def main_preprocess(path,save=True, *args):
+        from rembg import remove
+        
         whole, upframe, downframe = args
         rf, project, model = image_preprocessing.initialize_external()
         
@@ -385,7 +387,11 @@ class image_preprocessing:
             
             # Guardar
             image = cv2.cvtColor(image,cv2.COLOR_RGB2BGR)
-            image_preprocessing.save_image(path,image)
+            
+            if save==True:
+                image_preprocessing.save_image(path,image)
+            else:
+                return image
         except:
             pass
     
@@ -410,6 +416,8 @@ class image_preprocessing:
                 
     @classmethod
     def initialize_external(cls, instance=None,inner=False):
+        from roboflow import Roboflow
+        
         if inner:
             if instance is None:
                 raise ValueError('Se debe proveer una instancia cuando inner es True.')
@@ -739,6 +747,10 @@ class cnn_extractor:
                 cnn_extractor.multiexport(path,name, None, self.extract_features)
 
 class model_trainer:
+    knn_params = {'n_neighbors','weights','metric'}
+    rf_params = {'n_estimators','max_features','max_depth','min_samples_split','min_samples_leaf'}
+    ann_params = {'model__neurons','model__activation','optimizer','optimizer__learning_rate','epochs','batch_size'}
+    
     def __init__(self, tecnica: str, modelo: str, cnn_extractor=None):
         # keywords = {'técnica': (graph,gradient,convolutional) , 'modelo':(knn,rf,ann)}
         # Claves
@@ -770,7 +782,7 @@ class model_trainer:
         miss_T = train_set.dropna(axis=0).iloc[:,1:].apply(pd.to_numeric, errors='coerce').isna().any(axis=1)
         miss_t = test_set.dropna(axis=0).iloc[:,1:].apply(pd.to_numeric, errors='coerce').isna().any(axis=1)        
         
-        if (lines_train > train_set.shape[0] or lines_test > test_set.shape[0] or train_corr>0 or test_corr>0 or miss_T.sum()>0 or miss_t.sum()>0):
+        if ((lines_train > train_set.shape[0] or lines_test > test_set.shape[0] or train_corr>0 or test_corr>0 or miss_T.sum()>0 or miss_t.sum()>0) and (not lines_train - train_set.shape[0]==1 and not lines_test - test_set.shape[0]==1)):
             print('----- Sumilla de errores -----\n')
             if (lines_train > train_set.shape[0] or lines_test > test_set.shape[0]):
                 print(f'Se han encontrado {lines_train - train_set.shape[0]} errores de lectura en train y {lines_test - test_set.shape[0]} en test. Borrando.')
@@ -797,16 +809,8 @@ class model_trainer:
         
         # Definición de atributos auxiliares
         self.label = LabelEncoder()
+        self.label.fit(letras)
         self.__is_trained = False
-    
-    def requirement(attr_name):
-        def decorator(method):
-            def wrapper(self, *args, **kwargs):
-                if not getattr(self, attr_name, False):
-                    raise AttributeError("No hay modelo entrenado.")
-                return method(self, *args, **kwargs)
-            return wrapper
-        return decorator
     
     def class_counts(self):  
         train_count = self.train_set[1].value_counts().reset_index()
@@ -881,7 +885,7 @@ class model_trainer:
             
     def train_model(self,how: str = 'optimal',**kwargs):
         X_T = self.train_set[0]
-        Y_T = self.label.fit_transform(self.train_set[1])
+        Y_T = self.label.transform(self.train_set[1])
         
         # Configurar el modelo
         if how=='optimal': 
@@ -902,7 +906,7 @@ class model_trainer:
         elif how=='preset':
             if not kwargs:
                 raise ValueError("Se requieren **kwargs para el método how='optimal'.")
-            self.__preset_model()
+            self.__preset_model(X_T,Y_T,**kwargs)
         else:
             raise AttributeError('Valor en "how" no reconocido.')
         
@@ -920,11 +924,12 @@ class model_trainer:
         
         # Reportes generales de error
         self.test_report = classification_report(y_test,y_pred)
-        self.CM = pd.DataFrame(confusion_matrix(y_test,y_pred))
+        self.CM = pd.DataFrame(confusion_matrix(y_test,y_pred),columns=letras,index=letras)
+        self.normalized_CM = pd.DataFrame(confusion_matrix(y_test,y_pred,normalize='true'),columns=letras,index=letras)
 
         # ROC AUC de cada clase
         y_bintest = label_binarize(y_test,
-                                    classes=[letra for letra in np.unique(y_test)])
+                                    classes=[letra for letra in np.sort(np.unique(y_test))])
         fpr = dict()
         tpr = dict()
         roc_auc = dict()
@@ -952,34 +957,32 @@ class model_trainer:
             'tpr':tpr,
         }
     
-    @requirement('__is_trained')
     def export_model(self):        
         path = '/content/drive/MyDrive/ml-processing/' + f'{self.technique}-processing/models/{self.key_model}-model.pkl'
         with open(path, 'wb') as file:
             pickle.dump(self,file)
     
-    @requirement('__is_trained')
     def predict(self, X_test):
         # Como está en Label, la predicción arrojaría un número.
         # Con este nuevo método de reemplazo, te arroja la letra directamente.
         return self.label.inverse_transform(self.classificator.predict(X_test))
     
-    @requirement('__is_trained')
     def show_report(self):
         print(f'Reporte de modelo de {self.key_model} para la técnica {self.technique}\n')
         print(self.test_report)
     
-    @requirement('__is_trained')
-    def plot_CM(self,way='pandas-style'):
-        # self.CM.sort_index(axis=1, inplace=True)
-        # self.CM.sort_index(axis=0, inplace=True)
+    def plot_CM(self,way='pandas-style',normalized=True):
+        if normalized:
+            CM = self.normalized_CM
+        else:
+            CM = self.CM
         
         if way=='pandas-style':
-            stylish = self.CM.style.background_gradient(cmap='coolwarm')
+            stylish = CM.style.background_gradient(cmap='coolwarm')
             return stylish
         elif way=='seaborn':
             plt.figure(figsize=(10, 7))
-            sns.heatmap(self.CM, annot=True, fmt="d", cmap="coolwarm")
+            sns.heatmap(CM, annot=True, fmt="d", cmap="coolwarm")
             plt.title(f'Matriz de Confusión de {self.key_model} para la técnica {self.technique}')
             plt.xlabel('Predicción')
             plt.ylabel('Real')
@@ -987,16 +990,19 @@ class model_trainer:
         else:
             raise AttributeError("'way' debe ser o 'pandas-style' (predeterminado) o 'seaborn'." )
     
-    @requirement('__is_trained')
-    def plot_roc_curves(self,view='perclass'):
-        plt.figure()
+    def plot_roc_curves(self,view='perclass',letter='A'):
+        plt.figure(figsize=(10, 7))
         if view == 'perclass':
             for i in range(self.__support_AUC['y_bintest'].shape[1]):
-                plt.plot(self.__support_AUC['fpr'][i], self.__support_AUC['tpr'][i], label=f'Clase {i} (AUC = {self.AUC_scores["perclass"][i]:.2f})')
+                label = self.label.inverse_transform(i)
+                
+                plt.plot(self.__support_AUC['fpr'][i], self.__support_AUC['tpr'][i], label=f'Clase {label} (AUC = {self.AUC_scores["perclass"][i]:.2f})')
         elif view == 'ovr':
-            plt.plot(self.__support_AUC['fpr'][0], self.__support_AUC['tpr'][0], label=f'OVR (AUC = {self.AUC_scores["ovr"]:.2f})')
+            label = self.label.transform([letter])[0]
+            plt.plot(self.__support_AUC['fpr'][label], self.__support_AUC['tpr'][label], label=f'OVR (AUC = {self.AUC_scores["ovr"]:.2f})')
         elif view == 'ovo':
-            plt.plot(self.__support_AUC['fpr'][0], self.__support_AUC['tpr'][0], label=f'OVO (AUC = {self.AUC_scores["ovo"]:.2f})')
+            label = self.label.transform([letter])[0]
+            plt.plot(self.__support_AUC['fpr'][label], self.__support_AUC['tpr'][label], label=f'OVO (AUC = {self.AUC_scores["ovo"]:.2f})')
 
         plt.plot([0, 1], [0, 1], 'k--')
         plt.xlim([0.0, 1.0])
@@ -1004,7 +1010,7 @@ class model_trainer:
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
         plt.title('Curvas ROC')
-        plt.legend(loc='lower right')
+        plt.legend(bbox_to_anchor = (1.25, 0.6), loc='center right')
         plt.show()
     
     @staticmethod
@@ -1066,9 +1072,25 @@ class model_trainer:
         return grid_search.best_estimator_
     
     @staticmethod
-    def kwargs_load(keywords: dict):
+    def kwargs_load(keywords: dict,version=""):
         # keywords = {'tecnica': (graph,gradient,neural), 'modelo':(knn,rf,rn)}
-        path =  '/content/drive/MyDrive/ml-processing/' + f'{keywords["tecnica"]}-processing/{keywords["modelo"]}-model.pkl'
+        path =  '/content/drive/MyDrive/ml-processing/' + f'{keywords["tecnica"]}-processing/models'+ version +f'/{keywords["modelo"]}-model.pkl'
         with open(path,'rb') as file:
             model = pickle.load(file)
         return model
+    
+    @staticmethod
+    def update_model(kwargs,version="",model_label='classificator'):
+        old_model = model_trainer.kwargs_load(kwargs,version)
+        new_model = model_trainer(**kwargs)
+        
+        if kwargs['modelo']=='knn':
+            params = model_trainer.knn_params
+        elif kwargs['modelo']=='rf':
+            params = model_trainer.rf_params
+        elif kwargs['modelo']=='ann':
+            params = model_trainer.ann_params
+        
+        true_params = {key:value for key,value in eval(f'old_model.{model_label}.get_params().items()') if key in params}
+        new_model.train_model(how='preset',**true_params)
+        return new_model
