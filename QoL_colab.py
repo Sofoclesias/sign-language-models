@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from torch.multiprocessing import Pool, Manager
+from torchvision import models
 from scikeras.wrappers import KerasClassifier
 from keras._tf_keras.keras.models import Sequential
 from keras._tf_keras.keras.layers import Dense
@@ -593,41 +594,61 @@ class CustomCNN(nn.Module):
         x = self.dropout(x)
         return x
 
-class cnn_featurize(image_preprocessing):
-            def __init__(self, image_path, color: str = 'bgr'):
-                super().__init__(image_path,color)
-                self.image_path = image_path
-                self.letter = self.image_path.split('/')[-2]
+class ResNet(nn.Module):
+    def __init__(self, pretrained=True):
+        super(ResNet, self).__init__()
+        resnet = models.resnet18(pretrained=pretrained)
+        self.features = nn.Sequential(*list(resnet.children())[:-1])  # Eliminar la última capa de clasificación
 
-                # Preprocesamiento
-                self.resize_image(128,to_self=True)
-                self.to_grayscale(to_self=True)
-                self.image = self.image.astype('float32') / 255.0
-                self.image_tensor = torch.tensor(self.image).unsqueeze(0)
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)  # Aplanar el tensor
+        return x
 
-class cnn_extractor:
-    def __init__(self, train_paths, config, epochs=10):
+class featurizer(image_preprocessing):
+    def __init__(self, image_path, color: str = 'bgr'):
+        super().__init__(image_path,color)
+        self.image_path = image_path
+        self.letter = self.image_path.split('/')[-2]
+
+        # Preprocesamiento
+        self.resize_image(128,to_self=True)
+        self.to_grayscale(to_self=True)
+        self.image = self.image.astype('float32') / 255.0
+        self.image_tensor = torch.tensor(self.image).unsqueeze(0)
+
+class CNN_extractor:
+    def __init__(self, type_model, train_paths, config, epochs=20):
         self.config = config
-        self.model = CustomCNN(self.config)
+        if type_model=='custom':    
+            self.model = CustomCNN(self.config)
+        elif type_model=='resnet':
+            self.model = ResNet(**self.config)
+        else:
+            raise ValueError('Tipo de modelo no reconocido.')
+
         self.__get_dataset(train_paths)
         self.__train_model(epochs=epochs)
 
     @staticmethod
     def create_featurizer(path):
         try:
-            return cnn_featurize(path)
+            return featurizer(path)
         except:
             pass
 
     def __get_dataset(self,paths):
         with Pool(processes=8) as pool:
-            featurizers = pool.map(cnn_extractor.create_featurizer, paths) 
+            featurizers = pool.map(CNN_extractor.create_featurizer, [path for path in paths]) 
+            pool.close()
+            pool.join()
         
         self.le = LabelEncoder()
+        self.le.fit(letras)
         valid_featurizers = [featurizer for featurizer in featurizers if featurizer is not None]
 
         self.__tensors = torch.stack([featurizer.image_tensor for featurizer in valid_featurizers])
-        self.__labels = torch.tensor(self.le.fit_transform([featurizer.letter for featurizer in valid_featurizers]), dtype=torch.long)
+        self.__labels = torch.tensor(self.le.transform([featurizer.letter for featurizer in valid_featurizers]), dtype=torch.long)
 
         self.dataset = TensorDataset(self.__tensors,self.__labels)
 
@@ -691,67 +712,33 @@ class cnn_extractor:
     def normalize_cnn(features):
             features_norm = (features - np.mean(features)) / np.std(features)
             return features_norm
-    
-    @staticmethod
-    def multiexport(path,name,lock,features):
-            feats = [path.split('/')[-2]] + features.tolist()
-            columns = ['letra'] + [f'feature_{i}' for i in range(len(feats) - 1)]
-            df = pd.DataFrame([feats],columns=columns)
-            
-            if name =='path':
-                ruta = r'{}.csv'.format(path.split("/")[-3])
-            else:
-                ruta = name
-            
-            if lock is None:
-                df.to_csv(ruta, index=False, mode='a', header=not os.path.exists(ruta))
-            else:
-                with lock:
-                    df.to_csv(ruta, index=False, mode='a', header=not os.path.exists(ruta))
 
-    @staticmethod    
-    def tensorize_image(image_paths, model):
-        tensors = []
-        valid_paths = []
+    def transform_to_csv(self,image_paths,name:str='path'):
+        print('Exporting.')             
         for path in image_paths:
             try:
-                tensors.append(cnn_extractor.normalize_cnn(cnn_extractor.extract_features(path, model)))
-                valid_paths.append(path)
+                print(f'Caracterizando {path}')
+                tensor = CNN_extractor.normalize_cnn(CNN_extractor.extract_features(path,self.model))
+                feats = [path.split('/')[-2]] + tensor.tolist()
+                columns = ['letra'] + [f'feature_{i}' for i in range(len(feats) - 1)]
+                df = pd.DataFrame([feats],columns=columns)
+                
+                if name =='path':
+                    ruta = r'{}.csv'.format(path.split("/")[-3])
+                else:
+                    ruta = name
+                
+                df.to_csv(ruta, index=False, mode='a', header=not os.path.exists(ruta))
+                
             except:
                 pass
-        return valid_paths, tensors
-
-    def transform_to_csv(self,image_paths,name:str='path',n_jobs=-1):
-        print('Exporting.')
-        
-        chunk_size = len(image_paths) // 16
-        image_path_chunks = [image_paths[i:i + chunk_size] for i in range(0, len(image_paths), chunk_size)]
-        
-        all_paths = []
-        all_tensors = []
-        
-        with Pool(processes=8) as pool:
-            for valid_paths, tensors in pool.starmap(cnn_extractor.tensorize_image, [(chunk, self.model) for chunk in image_path_chunks]):
-                all_paths.extend(valid_paths)
-                all_tensors.extend(tensors)
-        
-        if n_jobs==-1:
-            with Manager() as manager:
-                lock = manager.Lock()
-                with Pool(processes=8) as pool:
-                    pool.starmap(cnn_extractor.multiexport, [(all_paths[i],name,lock,all_tensors[i]) for i in range(len(all_paths))])
-                    pool.close()
-                    pool.join()
-        else:
-            for path in image_paths:
-                cnn_extractor.multiexport(path,name, None, self.extract_features)
 
 class model_trainer:
     knn_params = {'n_neighbors','weights','metric'}
     rf_params = {'n_estimators','max_features','max_depth','min_samples_split','min_samples_leaf'}
     ann_params = {'model__neurons','model__activation','optimizer','optimizer__learning_rate','epochs','batch_size'}
     
-    def __init__(self, tecnica: str, modelo: str, cnn_extractor=None):
+    def __init__(self, tecnica: str, modelo: str, CNN_extractor=None):
         # keywords = {'técnica': (graph,gradient,convolutional) , 'modelo':(knn,rf,ann)}
         # Claves
         if tecnica in ['graph','gradient','convolutional'] and modelo in ['knn','rf','ann']:
@@ -759,8 +746,8 @@ class model_trainer:
             self.key_model = modelo
             
             if tecnica=='convolutional':
-                if cnn_extractor is not None:
-                    self.convolutor = cnn_extractor
+                if CNN_extractor is not None:
+                    self.convolutor = CNN_extractor
                 else:
                     raise ValueError("El argumento 'convolutional' requiere su respectivo convolutor.")
         else: 
