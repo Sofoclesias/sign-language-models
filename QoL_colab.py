@@ -346,7 +346,7 @@ class image_preprocessing:
         whole, upframe, downframe = args
         rf, project, model = image_preprocessing.initialize_external()
         
-        try:
+        try: # P y Q
             # Quitar fondo
             image = cv2.cvtColor(cv2.imread(path),cv2.COLOR_BGR2RGB)
             image = remove(image)
@@ -398,7 +398,6 @@ class image_preprocessing:
     
     @staticmethod
     def extractor(extract_class, configs, path, lock):
-        # No se considera 'convolutional' porque ya tiene métodos de multiprocessing internos.
         try:
             ins = extract_class(path,**configs)
             with lock:
@@ -463,7 +462,6 @@ class mediapipe_landmarks(image_preprocessing):
                 mp_drawing.draw_landmarks(self.image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
         else:
             self.results: bool = False
-            self.coords = np.zeros((21, 2))
             os.remove(self.image_path)
 
         hands.close()
@@ -509,7 +507,7 @@ class mediapipe_landmarks(image_preprocessing):
         
         return self.coords.flatten().tolist()
            
-class hog_transform(image_preprocessing):
+class hog_transform(image_preprocessing): #             (16x16),    (1x1)
     def __init__(self, image_path, color: str = 'bgr',ppc=(8,8),cpb=(3,3)):
         from skimage.feature import hog
         super().__init__(image_path,color)
@@ -594,17 +592,6 @@ class CustomCNN(nn.Module):
         x = self.dropout(x)
         return x
 
-class ResNet(nn.Module):
-    def __init__(self, pretrained=True):
-        super(ResNet, self).__init__()
-        resnet = models.resnet18(pretrained=pretrained)
-        self.features = nn.Sequential(*list(resnet.children())[:-1])  # Eliminar la última capa de clasificación
-
-    def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), -1)  # Aplanar el tensor
-        return x
-
 class featurizer(image_preprocessing):
     def __init__(self, image_path, color: str = 'bgr'):
         super().__init__(image_path,color)
@@ -622,8 +609,6 @@ class CNN_extractor:
         self.config = config
         if type_model=='custom':    
             self.model = CustomCNN(self.config)
-        elif type_model=='resnet':
-            self.model = ResNet(**self.config)
         else:
             raise ValueError('Tipo de modelo no reconocido.')
 
@@ -790,7 +775,7 @@ class model_trainer:
         # Almacenamiento de datasets
         X_train, Y_train = train_set.iloc[:,1:].apply(pd.to_numeric, errors='coerce'), train_set.iloc[:,0].apply(lambda x: str(x.decode('utf-8')).strip("b' ") if isinstance(x, bytes) else str(x).strip("b' ")).astype('str').apply(lambda x: x.strip())
         X_test, Y_test = test_set.iloc[:,1:].apply(pd.to_numeric, errors='coerce'), test_set.iloc[:,0].apply(lambda x: str(x.decode('utf-8')).strip("b' ") if isinstance(x, bytes) else str(x).strip("b' ")).astype('str').apply(lambda x: x.strip())
-        
+
         self.train_set = [X_train,Y_train]
         self.test_set = [X_test,Y_test]
         
@@ -1061,7 +1046,7 @@ class model_trainer:
     @staticmethod
     def kwargs_load(keywords: dict,version=""):
         # keywords = {'tecnica': (graph,gradient,neural), 'modelo':(knn,rf,rn)}
-        path =  '/content/drive/MyDrive/ml-processing/' + f'{keywords["tecnica"]}-processing/models'+ version +f'/{keywords["modelo"]}-model.pkl'
+        path = '/content/drive/MyDrive/ml-processing/' + f'{keywords["tecnica"]}-processing/models'+ version +f'/{keywords["modelo"]}-model.pkl'
         with open(path,'rb') as file:
             model = pickle.load(file)
         return model
